@@ -89,7 +89,11 @@ void bplus_tree_db::split(node *x, int i)
     if (z->leaf) {
         z->left = to_off(y);
         z->right = y->right;
-        if (y->right > 0) to_node(y->right)->left = to_off(z);
+        if (y->right > 0) {
+            node *r = to_node(y->right);
+            r->left = to_off(z);
+            r->dirty = true;
+        }
         y->right = to_off(z);
     }
     x->update();
