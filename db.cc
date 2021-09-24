@@ -1,4 +1,4 @@
-#include "bplus_tree_db.h"
+#include "db.h"
 
 #define KEY_LIMIT ((1u << 8) - 1)
 #define VALUE_LIMIT (1024)

@@ -4,7 +4,7 @@
 #include <sys/mman.h>
 #include <errno.h>
 
-#include "bplus_tree_db.h"
+#include "db.h"
 
 using namespace bplus_tree_db;
 
