@@ -42,6 +42,12 @@ void translation_table::lru_put(off_t off, node *node)
         if (evict_node->dirty) {
             save_node(evict_off, evict_node);
         }
+        // node被淘汰时，相应的value就应该从over_page_off中移除，不然就会导致野指针
+        for (auto value : evict_node->values) {
+            if (over_page_off.count(value)) {
+                over_page_off.erase(value);
+            }
+        }
         translation_to_off.erase(evict_node);
         translation_to_node.erase(evict_off);
         cache_list.pop_back();

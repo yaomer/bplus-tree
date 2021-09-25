@@ -73,7 +73,6 @@ DB::iterator DB::find(node *x, const key_t& key)
 
 void DB::insert(const key_t& key, const value_t& value)
 {
-    printf("key = %s\n", key.c_str());
     node *r = root;
     if (!check_limit(key, value)) return;
     if (isfull(r, key, value)) {
@@ -183,7 +182,7 @@ bool DB::isfull(node *x, const key_t& key, const value_t& value)
     if (x->leaf) {
         page_used += (limit.key_len_field + key.size()) + (limit.value_len_field + std::min(limit.over_value, value.size()));
     } else {
-        page_used += (limit.key_len_field + limit.max_key) + sizeof(off_t);
+        page_used += (limit.key_len_field + limit.max_key) + limit.off_field;
     }
     return page_used > header.page_size;
 }
