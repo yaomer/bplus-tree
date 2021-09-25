@@ -23,6 +23,14 @@ typedef std::string value_t;
 
 struct node {
     node(bool leaf) : leaf(leaf) {  }
+    ~node()
+    {
+        if (!leaf) return;
+        for (auto it = values.begin(); it != values.end(); ) {
+            auto e = it++;
+            delete *e;
+        }
+    }
 
     void resize(int n)
     {
@@ -45,58 +53,43 @@ struct node {
     {
         copy(i, this, j);
     }
-    void update(bool dirty = true)
-    {
-        used_bytes = 1 + 2;
-        for (auto& key : keys) used_bytes += 1 + key.size();
-        if (leaf) {
-            for (auto& value : values) used_bytes += 2 + value->size();
-            used_bytes += sizeof(off_t) * 2;
-        } else {
-            used_bytes += sizeof(off_t) * childs.size();
-        }
-        this->dirty = dirty;
-    }
+    void update(bool dirty = true);
+
     bool leaf;
     bool dirty = false;
     std::vector<key_t> keys;
     std::vector<off_t> childs;
     std::vector<value_t*> values;
-    size_t used_bytes = 3;
+    size_t page_used = 3;
     off_t left = 0, right = 0;
 };
 
-class db {
+class DB {
 public:
-    db() : translation_table("dump.bpt", &header)
+    DB() : translation_table("dump.bpt", this)
     {
         init();
     }
 
-    db(const std::string& filename)
-        : translation_table(filename, &header)
+    DB(const std::string& filename)
+        : translation_table(filename, this)
     {
         init();
     }
 
-    struct Comparator {
-        bool operator()(const key_t& l, const key_t& r) const
-        {
-            return std::less<key_t>()(l, r);
-        }
-    };
+    typedef std::function<bool(const key_t&, const key_t&)> Comparator;
 
     class iterator {
     public:
-        iterator(db *b) : b(b), off(0), i(0) {  }
-        iterator(db *b, off_t off, int i) : b(b), off(off), i(i) {  }
+        iterator(DB *db) : db(db), off(0), i(0) {  }
+        iterator(DB *db, off_t off, int i) : db(db), off(off), i(i) {  }
         bool valid() { return off > 0; }
-        key_t *key() { return &b->to_node(off)->keys[i]; }
-        value_t *value() { return b->to_node(off)->values[i]; }
+        key_t *key() { return &db->to_node(off)->keys[i]; }
+        value_t *value() { return db->to_node(off)->values[i]; }
         iterator& next()
         {
             if (off > 0) {
-                node *x = b->to_node(off);
+                node *x = db->to_node(off);
                 if (i + 1 < x->keys.size()) i++;
                 else {
                     off = x->right;
@@ -108,20 +101,29 @@ public:
         iterator& prev()
         {
             if (off > 0) {
-                node *x = b->to_node(off);
+                node *x = db->to_node(off);
                 if (i - 1 >= 0) i--;
                 else {
                     off = x->left;
-                    if (off > 0) i = b->to_node(off)->keys.size() - 1;
+                    if (off > 0) i = db->to_node(off)->keys.size() - 1;
                 }
             }
             return *this;
         }
     private:
-        db *b;
+        DB *db;
         off_t off;
         int i;
     };
+
+    void set_key_comparator(Comparator comp)
+    {
+        comparator = comp;
+    }
+    void set_page_cache_slots(int slots)
+    {
+        translation_table.set_cache_cap(slots);
+    }
 
     iterator first() { return iterator(this, header.leaf_off, 0); }
     iterator find(const key_t& key)
@@ -141,7 +143,7 @@ public:
             split(root, 0);
         }
         insert(root, key, value);
-        translation_table.flush(root);
+        translation_table.flush();
     }
 private:
     void init();
@@ -181,6 +183,7 @@ private:
     node *root; // 根节点常驻内存
     translation_table translation_table;
     Comparator comparator;
+    friend class translation_table;
 };
 }
 

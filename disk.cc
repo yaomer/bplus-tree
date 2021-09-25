@@ -8,8 +8,8 @@
 
 using namespace bplus_tree_db;
 
-translation_table::translation_table(const std::string& filename, header_t *header)
-    : filename(filename), header(header)
+translation_table::translation_table(const std::string& filename, DB *db)
+    : filename(filename), db(db), lru_cap(1024)
 {
     fd = open(filename.c_str(), O_RDWR | O_CREAT, 0644);
     if (fd < 0) {
@@ -18,72 +18,105 @@ translation_table::translation_table(const std::string& filename, header_t *head
     load_header();
 }
 
-node *translation_table::to_node(off_t off)
+node *translation_table::lru_get(off_t off)
 {
     auto it = translation_to_node.find(off);
-    if (it != translation_to_node.end()) {
-        return it->second;
-    } else {
-        node *node = load_node(off);
-        put(off, node);
-        return node;
+    if (it == translation_to_node.end()) return nullptr;
+    if (it->second.pos != cache_list.begin()) {
+        cache_list.erase(it->second.pos);
+        cache_list.push_front(it->first);
+        it->second.pos = cache_list.begin();
     }
+    return it->second.x.get();
+}
+
+// 放入的<off, node>一定是原先不存在的
+void translation_table::lru_put(off_t off, node *node)
+{
+    if (translation_to_node.count(off)) {
+        panic("lru_put: off=%lld exists", off);
+    }
+    if (cache_list.size() == lru_cap) {
+        off_t evict_off = cache_list.back();
+        auto *evict_node = translation_to_node[evict_off].x.get();
+        if (evict_node->dirty) {
+            save_node(evict_off, evict_node);
+        }
+        translation_to_off.erase(evict_node);
+        translation_to_node.erase(evict_off);
+        cache_list.pop_back();
+    }
+    cache_list.push_front(off);
+    translation_to_node.emplace(off, cache_node(node, cache_list.begin()));
+    translation_to_off.emplace(node, off);
+}
+
+// 退出时flush所有的dirty node
+void translation_table::lru_flush()
+{
+    for (auto& [node, off] : translation_to_off) {
+        if (node->dirty) {
+            save_node(off, node);
+        }
+    }
+    translation_to_node.clear();
+    if (db->root->dirty) {
+        save_node(db->header.root_off, db->root);
+    }
+    save_header();
+    fsync(fd);
+}
+
+node *translation_table::to_node(off_t off)
+{
+    if (off == db->header.root_off) return db->root;
+    node *node = lru_get(off);
+    if (node == nullptr) {
+        node = load_node(off);
+        lru_put(off, node);
+    }
+    return node;
 }
 
 off_t translation_table::to_off(node *node)
 {
+    if (node == db->root) return db->header.root_off;
     return translation_to_off.find(node)->second;
 }
 
-void translation_table::flush(node *root)
+// 将每次修改操作涉及到的所有dirty node写回磁盘
+// 但节点本身在被淘汰前仍驻留在内存中
+void translation_table::flush()
 {
-    if (root == nullptr) {
-        panic("flush(root=nullptr)");
-    }
-    if (root->dirty) {
-        save_node(header->root_off, root);
-        root->dirty = false;
-    }
-    for (auto& [off, node] : translation_to_node) {
+    for (auto *node : change_list) {
         if (node->dirty) {
-            save_node(off, node);
+            save_node(to_off(node), node);
             node->dirty = false;
         }
-        if (off == header->root_off) continue;
-        for (auto it = node->values.begin(); it != node->values.end(); ) {
-            auto e = it++;
-            delete *e;
-        }
     }
+    change_list.clear();
     save_header();
-    // 更好的做法是维护一个LRU缓存，缓存一些经常访问的节点
-    // 不用每次清空
-    for (auto it = translation_to_node.begin(); it != translation_to_node.end(); ) {
-        auto e = it++;
-        delete e->second;
-    }
-    translation_to_node.clear();
-    translation_to_off.clear();
+    fsync(fd);
 }
 
 // ########################### file-header ###########################
-// [magic][page-size][nodes][root-off][leaf-off][free-list-head][free-blocks]
+// [magic][page-size][nodes][root-off][leaf-off][free-list-head][free-pages]
 void translation_table::fill_header(struct iovec *iov)
 {
-    iov[0].iov_base = &header->magic;
-    iov[0].iov_len = sizeof(header->magic);
-    iov[1].iov_base = &header->page_size;
-    iov[1].iov_len = sizeof(header->page_size);
-    iov[2].iov_base = &header->nodes;
-    iov[2].iov_len = sizeof(header->nodes);
-    iov[3].iov_base = &header->root_off;
-    iov[3].iov_len = sizeof(header->root_off);
-    iov[4].iov_base = &header->leaf_off;
-    iov[4].iov_len = sizeof(header->leaf_off);
-    iov[5].iov_base = &header->free_list_head;
-    iov[5].iov_len = sizeof(header->free_list_head);
-    iov[6].iov_base = &header->free_pages;
-    iov[6].iov_len = sizeof(header->free_pages);
+    iov[0].iov_base = &db->header.magic;
+    iov[0].iov_len = sizeof(db->header.magic);
+    iov[1].iov_base = &db->header.page_size;
+    iov[1].iov_len = sizeof(db->header.page_size);
+    iov[2].iov_base = &db->header.nodes;
+    iov[2].iov_len = sizeof(db->header.nodes);
+    iov[3].iov_base = &db->header.root_off;
+    iov[3].iov_len = sizeof(db->header.root_off);
+    iov[4].iov_base = &db->header.leaf_off;
+    iov[4].iov_len = sizeof(db->header.leaf_off);
+    iov[5].iov_base = &db->header.free_list_head;
+    iov[5].iov_len = sizeof(db->header.free_list_head);
+    iov[6].iov_base = &db->header.free_pages;
+    iov[6].iov_len = sizeof(db->header.free_pages);
 }
 
 void translation_table::save_header()
@@ -101,7 +134,7 @@ void translation_table::load_header()
     fstat(fd, &st);
     if (st.st_size == 0) return;
     read(fd, &magic, sizeof(magic));
-    if (magic != header->magic) {
+    if (magic != db->header.magic) {
         panic("unknown data file <%s>", filename.c_str());
     }
     struct iovec iov[7];
@@ -110,15 +143,17 @@ void translation_table::load_header()
     readv(fd, iov, 7);
 }
 
+// ############################# page #############################
+
 off_t translation_table::alloc_page()
 {
-    off_t off = header->free_list_head;
-    if (header->free_pages > 0) {
-        header->free_pages--;
+    off_t off = db->header.free_list_head;
+    if (db->header.free_pages > 0) {
+        db->header.free_pages--;
         lseek(fd, off, SEEK_SET);
-        read(fd, &header->free_list_head, sizeof(header->free_list_head));
+        read(fd, &db->header.free_list_head, sizeof(db->header.free_list_head));
     } else {
-        header->free_list_head += header->page_size;
+        db->header.free_list_head += db->header.page_size;
     }
     return off;
 }
@@ -126,80 +161,133 @@ off_t translation_table::alloc_page()
 void translation_table::free_page(off_t off)
 {
     lseek(fd, off, SEEK_SET);
-    write(fd, &header->free_list_head, sizeof(header->free_list_head));
-    header->free_list_head = off;
-    header->free_pages++;
+    write(fd, &db->header.free_list_head, sizeof(db->header.free_list_head));
+    db->header.free_list_head = off;
+    db->header.free_pages++;
+}
+
+// ############################# encoding #############################
+
+static void encode8(std::string& buf, uint8_t n)
+{
+    buf.append(reinterpret_cast<char*>(&n), 1);
+}
+
+static void encode16(std::string& buf, uint16_t n)
+{
+    buf.append(reinterpret_cast<char*>(&n), 2);
+}
+
+static void encodeoff(std::string& buf, off_t off)
+{
+    buf.append(reinterpret_cast<char*>(&off), sizeof(off));
+}
+
+static uint8_t decode8(char **ptr)
+{
+    uint8_t n = *reinterpret_cast<uint8_t*>(*ptr);
+    *ptr += 1;
+    return n;
+}
+
+static uint16_t decode16(char **ptr)
+{
+    uint16_t n = *reinterpret_cast<uint16_t*>(*ptr);
+    *ptr += 2;
+    return n;
+}
+
+static off_t decodeoff(char **ptr)
+{
+    off_t n = *reinterpret_cast<off_t*>(*ptr);
+    *ptr += sizeof(n);
+    return n;
+}
+
+// ############################# node #############################
+// 1 bytes [leaf]
+// 2 bytes [key-nums]
+// all-keys [key -> 1 bytes [key-len] [key]]
+// ########################### inner-node ###########################
+// if leaf = 0:
+// all-child-offs [child-off -> sizeof(off_t)]
+// ########################### leaf-node ###########################
+// if leaf = 1:
+// all-values [value -> 2 bytes [value-len] [value]]
+// left-off right-off -> sizeof(off_t)
+//
+void node::update(bool dirty)
+{
+    page_used = 1 + 2; // leaf and key-nums
+    for (auto& key : keys) page_used += 1 + key.size();
+    if (leaf) {
+        for (auto& value : values) page_used += 2 + value->size();
+        page_used += sizeof(off_t) * 2;
+    } else {
+        page_used += sizeof(off_t) * childs.size();
+    }
+    this->dirty = dirty;
 }
 
 void translation_table::save_node(off_t off, node *node)
 {
     std::string buf;
-    buf.reserve(header->page_size);
-    buf.append(1, node->leaf);
-    uint16_t keynums = node->keys.size();
-    buf.append((char*)&keynums, sizeof(keynums));
+    buf.reserve(db->header.page_size);
+    encode8(buf, node->leaf);
+    encode16(buf, node->keys.size());
     for (auto& key : node->keys) {
-        uint8_t keylen = key.size();
-        buf.append((char*)&keylen, sizeof(keylen));
+        encode8(buf, key.size());
         buf.append(key);
     }
     if (node->leaf) {
         for (auto& value : node->values) {
-            uint16_t valuelen = value->size();
-            buf.append((char*)&valuelen, sizeof(valuelen));
+            encode16(buf, value->size());
             buf.append(*value);
         }
-        buf.append((char*)&node->left, sizeof(node->left));
-        buf.append((char*)&node->right, sizeof(node->right));
+        encodeoff(buf, node->left);
+        encodeoff(buf, node->right);
     } else {
         for (auto& child_off : node->childs) {
-            buf.append((char*)&child_off, sizeof(child_off));
+            encodeoff(buf, child_off);
         }
     }
     lseek(fd, off, SEEK_SET);
-    write(fd, buf.data(), header->page_size);
+    write(fd, buf.data(), db->header.page_size);
 }
 
 node *translation_table::load_node(off_t off)
 {
-    void *start = mmap(nullptr, header->page_size, PROT_READ, MAP_SHARED, fd, off);
+    void *start = mmap(nullptr, db->header.page_size, PROT_READ, MAP_SHARED, fd, off);
     if (start == MAP_FAILED) {
         panic("load node failed from off=%lld: %s", off, strerror(errno));
     }
     char *buf = reinterpret_cast<char*>(start);
-    node *node = new struct node(*buf);
-    buf += 1;
-    uint16_t keynums = *(uint16_t*)buf;
-    buf += sizeof(uint16_t);
+    uint8_t leaf = decode8(&buf);
+    node *node = new struct node(leaf);
+    uint16_t keynums = decode16(&buf);
     node->keys.reserve(keynums);
     for (int i = 0; i < keynums; i++) {
-        uint8_t keylen = *(uint8_t*)buf;
-        buf += sizeof(uint8_t);
+        uint8_t keylen = decode8(&buf);
         node->keys.emplace_back(buf, keylen);
         buf += keylen;
     }
     if (node->leaf) {
         node->values.reserve(keynums);
         for (int i = 0; i < keynums; i++) {
-            uint16_t valuelen = *(uint16_t*)buf;
-            buf += sizeof(uint16_t);
+            uint16_t valuelen = decode16(&buf);
             node->values.emplace_back(new value_t(buf, valuelen));
             buf += valuelen;
         }
-        node->left = *(off_t*)buf;
-        buf += sizeof(off_t);
-        node->right = *(off_t*)buf;
-        buf += sizeof(off_t);
+        node->left = decodeoff(&buf);
+        node->right = decodeoff(&buf);
     } else {
         node->childs.reserve(keynums);
         for (int i = 0; i < keynums; i++) {
-            off_t child_off = *(off_t*)buf;
-            node->childs.emplace_back(child_off);
-            buf += sizeof(off_t);
+            node->childs.emplace_back(decodeoff(&buf));
         }
     }
     node->update(false);
-    munmap(start, header->page_size);
+    munmap(start, db->header.page_size);
     return node;
 }
 

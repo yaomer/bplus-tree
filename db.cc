@@ -5,8 +5,11 @@
 
 using namespace bplus_tree_db;
 
-void db::init()
+void DB::init()
 {
+    comparator = [](const key_t& l, const key_t& r) {
+        return std::less<key_t>()(l, r);
+    };
     if (header.nodes == 0) {
         header.root_off = translation_table.alloc_page();
         header.leaf_off = header.root_off;
@@ -16,7 +19,7 @@ void db::init()
     }
 }
 
-db::iterator db::find(node *x, const key_t& key)
+DB::iterator DB::find(node *x, const key_t& key)
 {
     int i = search(x, key);
     if (i == x->keys.size()) return iterator(this);
@@ -27,12 +30,14 @@ db::iterator db::find(node *x, const key_t& key)
     return find(to_node(x->childs[i]), key);
 }
 
-void db::insert(node *x, const key_t& key, const value_t& value)
+void DB::insert(node *x, const key_t& key, const value_t& value)
 {
     int i = search(x, key);
     int n = x->keys.size();
+    translation_table.put_change_node(x);
     if (x->leaf) {
         if (i < n && equal(x->keys[i], key)) {
+            if (x->values[i]->compare(value) == 0) return;
             delete x->values[i];
             x->values[i] = new value_t(value);
         } else {
@@ -40,8 +45,7 @@ void db::insert(node *x, const key_t& key, const value_t& value)
             for (int j = n - 2; j >= i; j--) {
                 x->copy(j + 1, j);
             }
-            node *leaf = header.leaf_off == header.root_off ? root : to_node(header.leaf_off);
-            if (less(key, leaf->keys[0])) header.leaf_off = to_off(x);
+            if (less(key, to_node(header.leaf_off)->keys[0])) header.leaf_off = to_off(x);
             x->keys[i] = key;
             x->values[i] = new value_t(value);
             header.nodes++;
@@ -60,7 +64,7 @@ void db::insert(node *x, const key_t& key, const value_t& value)
     }
 }
 
-void db::split(node *x, int i)
+void DB::split(node *x, int i)
 {
     node *y = to_node(x->childs[i]);
     node *z = split(y);
@@ -89,7 +93,7 @@ void db::split(node *x, int i)
     x->update();
 }
 
-node *db::split(node *x)
+node *DB::split(node *x)
 {
     int n = x->keys.size();
     int t = ceil(n / 2.0);
@@ -106,18 +110,18 @@ node *db::split(node *x)
     return y;
 }
 
-bool db::isfull(node *x, const key_t& key, const value_t& value)
+bool DB::isfull(node *x, const key_t& key, const value_t& value)
 {
-    size_t used = x->used_bytes;
+    size_t page_used = x->page_used;
     if (x->leaf) {
-        used += (1 + key.size()) + (2 + value.size());
+        page_used += (1 + key.size()) + (2 + value.size());
     } else {
-        used += (1 + KEY_LIMIT) + sizeof(off_t);
+        page_used += (1 + KEY_LIMIT) + sizeof(off_t);
     }
-    return used > header.page_size;
+    return page_used > header.page_size;
 }
 
-bool db::check_limit(const key_t& key, const value_t& value)
+bool DB::check_limit(const key_t& key, const value_t& value)
 {
     if (key.size() > KEY_LIMIT) {
         printf("key(%s) over the max-limit(%d)\n", key.c_str(), KEY_LIMIT);
