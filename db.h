@@ -4,13 +4,15 @@
 #include <string>
 #include <vector>
 
+#include <limits.h>
+
 #include "disk.h"
 
 namespace bplus_tree_db {
 
 struct header_t {
     int8_t magic = 0x1a;
-    size_t page_size = 1024 * 4;
+    size_t page_size = 1024 * 16;
     size_t nodes = 0;
     off_t root_off = 0;
     off_t leaf_off = 0;
@@ -18,11 +20,29 @@ struct header_t {
     size_t free_pages = 0;
 };
 
-typedef std::string key_t;
-typedef std::string value_t;
+struct limits {
+    // key允许的最大长度，较小的key有助于最大化索引节点的分支因子
+    const size_t max_key = UINT8_MAX;
+    // 如果一个value的长度超过了over_value，那么超出的部分将被存放到溢出页
+    const size_t over_value = 1024;
+    const size_t max_value = UINT32_MAX;
+    const size_t type_field = 1;
+    const size_t key_nums_field = 2;
+    const size_t key_len_field = 1;
+    const size_t value_len_field = 4;
+    const size_t off_field = sizeof(off_t);
+};
+
+void panic(const char *fmt, ...);
+
+extern struct limits limit;
 
 struct node {
-    node(bool leaf) : leaf(leaf) {  }
+    node(bool leaf) : leaf(leaf)
+    {
+        page_used = limit.type_field + limit.key_nums_field;
+        if (leaf) page_used += limit.off_field * 2; // left and right
+    }
     ~node()
     {
         if (!leaf) return;
@@ -60,7 +80,7 @@ struct node {
     std::vector<key_t> keys;
     std::vector<off_t> childs;
     std::vector<value_t*> values;
-    size_t page_used = 3;
+    size_t page_used;
     off_t left = 0, right = 0;
 };
 
@@ -70,12 +90,13 @@ public:
     {
         init();
     }
-
     DB(const std::string& filename)
         : translation_table(filename, this)
     {
         init();
     }
+    DB(const DB&) = delete;
+    DB& operator=(const DB&) = delete;
 
     typedef std::function<bool(const key_t&, const key_t&)> Comparator;
 
@@ -116,35 +137,13 @@ public:
         int i;
     };
 
-    void set_key_comparator(Comparator comp)
-    {
-        comparator = comp;
-    }
-    void set_page_cache_slots(int slots)
-    {
-        translation_table.set_cache_cap(slots);
-    }
+    void set_key_comparator(Comparator comp);
+    void set_page_size(int page_size);
+    void set_page_cache_slots(int slots);
 
     iterator first() { return iterator(this, header.leaf_off, 0); }
-    iterator find(const key_t& key)
-    {
-        return find(root, key);
-    }
-    void insert(const key_t& key, const value_t& value)
-    {
-        node *r = root;
-        if (!check_limit(key, value)) return;
-        if (isfull(r, key, value)) {
-            root = new node(false);
-            root->resize(1);
-            root->childs[0] = header.root_off;
-            translation_table.put(header.root_off, r);
-            header.root_off = translation_table.alloc_page();
-            split(root, 0);
-        }
-        insert(root, key, value);
-        translation_table.flush();
-    }
+    iterator find(const key_t& key) { return find(root, key); }
+    void insert(const key_t& key, const value_t& value);
 private:
     void init();
 
@@ -154,19 +153,12 @@ private:
     iterator find(node *x, const key_t& key);
     void insert(node *x, const key_t& key, const value_t& value);
 
-    bool check_limit(const key_t& key, const value_t& value);
-
     void split(node *x, int i);
     node *split(node *x);
 
-    // 查找x->keys[]中大于等于key的关键字的索引位置
-    int search(node *x, const key_t& key)
-    {
-        auto comp = comparator;
-        auto p = std::lower_bound(x->keys.begin(), x->keys.end(), key, comp);
-        if (p == x->keys.end()) return x->keys.size();
-        return std::distance(x->keys.begin(), p);
-    }
+    int search(node *x, const key_t& key);
+
+    bool check_limit(const key_t& key, const value_t& value);
 
     bool isfull(node *x, const key_t& key, const value_t& value);
 

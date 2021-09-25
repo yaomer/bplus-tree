@@ -178,6 +178,11 @@ static void encode16(std::string& buf, uint16_t n)
     buf.append(reinterpret_cast<char*>(&n), 2);
 }
 
+static void encode32(std::string& buf, uint32_t n)
+{
+    buf.append(reinterpret_cast<char*>(&n), 4);
+}
+
 static void encodeoff(std::string& buf, off_t off)
 {
     buf.append(reinterpret_cast<char*>(&off), sizeof(off));
@@ -197,6 +202,13 @@ static uint16_t decode16(char **ptr)
     return n;
 }
 
+static uint32_t decode32(char **ptr)
+{
+    uint32_t n = *reinterpret_cast<uint32_t*>(*ptr);
+    *ptr += 4;
+    return n;
+}
+
 static off_t decodeoff(char **ptr)
 {
     off_t n = *reinterpret_cast<off_t*>(*ptr);
@@ -205,26 +217,26 @@ static off_t decodeoff(char **ptr)
 }
 
 // ############################# node #############################
-// 1 bytes [leaf]
-// 2 bytes [key-nums]
-// all-keys [key -> 1 bytes [key-len] [key]]
+// [leaf]
+// [key-nums]
+// all-keys [key -> [key-len] [key]]
 // ########################### inner-node ###########################
-// if leaf = 0:
-// all-child-offs [child-off -> sizeof(off_t)]
+// all-child-offs
 // ########################### leaf-node ###########################
-// if leaf = 1:
-// all-values [value -> 2 bytes [value-len] [value]]
-// left-off right-off -> sizeof(off_t)
+// all-values [value -> [value-len] [value] (over-pages)]
+// left-off right-off
 //
 void node::update(bool dirty)
 {
-    page_used = 1 + 2; // leaf and key-nums
-    for (auto& key : keys) page_used += 1 + key.size();
+    page_used = limit.type_field + limit.key_nums_field;
+    for (auto& key : keys) page_used += limit.key_len_field + key.size();
     if (leaf) {
-        for (auto& value : values) page_used += 2 + value->size();
-        page_used += sizeof(off_t) * 2;
+        for (auto& value : values)  {
+            page_used += limit.value_len_field + std::min(limit.over_value, value->size());
+        }
+        page_used += limit.off_field * 2;
     } else {
-        page_used += sizeof(off_t) * childs.size();
+        page_used += limit.off_field * childs.size();
     }
     this->dirty = dirty;
 }
@@ -232,7 +244,7 @@ void node::update(bool dirty)
 void translation_table::save_node(off_t off, node *node)
 {
     std::string buf;
-    buf.reserve(db->header.page_size);
+    buf.reserve(node->page_used);
     encode8(buf, node->leaf);
     encode16(buf, node->keys.size());
     for (auto& key : node->keys) {
@@ -241,8 +253,7 @@ void translation_table::save_node(off_t off, node *node)
     }
     if (node->leaf) {
         for (auto& value : node->values) {
-            encode16(buf, value->size());
-            buf.append(*value);
+            save_value(buf, value);
         }
         encodeoff(buf, node->left);
         encodeoff(buf, node->right);
@@ -252,7 +263,53 @@ void translation_table::save_node(off_t off, node *node)
         }
     }
     lseek(fd, off, SEEK_SET);
-    write(fd, buf.data(), db->header.page_size);
+    // 如果没有写满一页的话，也不会有什么问题，文件空洞是允许的
+    write(fd, buf.data(), buf.size());
+}
+
+void translation_table::save_value(std::string& buf, value_t *value)
+{
+    uint32_t len = value->size();
+    encode32(buf, len);
+    if (len <= limit.over_value) {
+        buf.append(*value);
+        return;
+    }
+    size_t pos = limit.over_value - limit.off_field;
+    auto it = over_page_off.find(value);
+    // 我们只需将存储到叶节点本身的部分数据写入磁盘即可
+    if (it != over_page_off.end()) {
+        encodeoff(buf, it->second);
+        buf.append(value->data(), pos);
+        return;
+    }
+    // 如果是新插入的值，那么我们就需要为所有数据分配新页，并全部写入磁盘
+    // [value-len][over-page-off][value]
+    off_t off = alloc_page();
+    encodeoff(buf, off);
+    buf.append(value->data(), pos);
+    over_page_off.emplace(value, off);
+    // 剩余的数据将被以分页的形式写入多个溢出页中，多个溢出页之间链式相连
+    // over-page -> [next-over-page-off][value]
+    size_t remain_bytes = len - pos;
+    size_t cap_of_page = db->header.page_size - limit.off_field;
+    size_t n = remain_bytes / cap_of_page;
+    size_t r = remain_bytes % cap_of_page;
+    std::vector<size_t> pages(n, cap_of_page);
+    if (r > 0) pages.push_back(r);
+
+    for (int i = 0; i < pages.size(); i++) {
+        struct iovec iov[2];
+        off_t next_off = i == pages.size() - 1 ? 0 : alloc_page();
+        iov[0].iov_base = &next_off;
+        iov[0].iov_len = sizeof(next_off);
+        iov[1].iov_base = value->data() + pos;
+        iov[1].iov_len = pages[i];
+        pos += pages[i];
+        lseek(fd, off, SEEK_SET);
+        writev(fd, iov, 2);
+        off = next_off;
+    }
 }
 
 node *translation_table::load_node(off_t off)
@@ -274,9 +331,7 @@ node *translation_table::load_node(off_t off)
     if (node->leaf) {
         node->values.reserve(keynums);
         for (int i = 0; i < keynums; i++) {
-            uint16_t valuelen = decode16(&buf);
-            node->values.emplace_back(new value_t(buf, valuelen));
-            buf += valuelen;
+            node->values.emplace_back(load_value(&buf));
         }
         node->left = decodeoff(&buf);
         node->right = decodeoff(&buf);
@@ -291,14 +346,56 @@ node *translation_table::load_node(off_t off)
     return node;
 }
 
-void translation_table::panic(const char *fmt, ...)
+value_t *translation_table::load_value(char **ptr)
 {
-    va_list ap;
-    char buf[1024];
-    va_start(ap, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, ap);
-    fprintf(stderr, "error: %s\n", buf);
-    va_end(ap);
-    // TODO: do sth
-    exit(1);
+    uint32_t len = decode32(ptr);
+    if (len <= limit.over_value) {
+        value_t *value = new value_t(*ptr, len);
+        *ptr += len;
+        return value;
+    }
+    value_t *value = new value_t();
+    off_t off = decodeoff(ptr);
+    over_page_off.emplace(value, off);
+    size_t n = limit.over_value - limit.off_field;
+    value->append(*ptr, n);
+    *ptr += n;
+
+    size_t remain_bytes = len - n;
+    size_t cap_of_page = db->header.page_size - limit.off_field;
+
+    while (true) {
+        void *start = mmap(nullptr, db->header.page_size, PROT_READ, MAP_SHARED, fd, off);
+        if (start == MAP_FAILED) {
+            panic("load page failed from off=%lld: %s", off, strerror(errno));
+        }
+        char *buf = reinterpret_cast<char*>(start);
+        off = decodeoff(&buf);
+        if (remain_bytes >= cap_of_page) {
+            value->append(buf, cap_of_page);
+            remain_bytes -= cap_of_page;
+        } else {
+            value->append(buf, remain_bytes);
+        }
+        munmap(start, db->header.page_size);
+        if (off == 0) break;
+    }
+    return value;
+}
+
+void translation_table::free_value(value_t *value)
+{
+    if (value->size() > limit.over_value) {
+        off_t off = over_page_off[value];
+        over_page_off.erase(value);
+        while (true) {
+            lseek(fd, off, SEEK_SET);
+            off_t next_off;
+            read(fd, &next_off, sizeof(off_t));
+            if (off > 0) free_page(off);
+            off = next_off;
+            if (off == 0) break;
+        }
+    }
+    delete value;
 }
