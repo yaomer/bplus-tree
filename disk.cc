@@ -67,7 +67,7 @@ void translation_table::lru_flush()
     }
     translation_to_node.clear();
     if (db->root->dirty) {
-        save_node(db->header.root_off, db->root);
+        save_node(db->header.root_off, db->root.get());
     }
     save_header();
     fsync(fd);
@@ -75,7 +75,7 @@ void translation_table::lru_flush()
 
 node *translation_table::to_node(off_t off)
 {
-    if (off == db->header.root_off) return db->root;
+    if (off == db->header.root_off) return db->root.get();
     node *node = lru_get(off);
     if (node == nullptr) {
         node = load_node(off);
@@ -86,7 +86,7 @@ node *translation_table::to_node(off_t off)
 
 off_t translation_table::to_off(node *node)
 {
-    if (node == db->root) return db->header.root_off;
+    if (node == db->root.get()) return db->header.root_off;
     return translation_to_off.find(node)->second;
 }
 
@@ -94,7 +94,7 @@ off_t translation_table::to_off(node *node)
 // 但节点本身在被淘汰前仍驻留在内存中
 void translation_table::flush()
 {
-    for (auto *node : change_list) {
+    for (auto node : change_list) {
         if (node->dirty) {
             save_node(to_off(node), node);
             node->dirty = false;
@@ -106,15 +106,15 @@ void translation_table::flush()
 }
 
 // ########################### file-header ###########################
-// [magic][page-size][nodes][root-off][leaf-off][free-list-head][free-pages]
+// [magic][page-size][key-nums][root-off][leaf-off][free-list-head][free-pages]
 void translation_table::fill_header(struct iovec *iov)
 {
     iov[0].iov_base = &db->header.magic;
     iov[0].iov_len = sizeof(db->header.magic);
     iov[1].iov_base = &db->header.page_size;
     iov[1].iov_len = sizeof(db->header.page_size);
-    iov[2].iov_base = &db->header.nodes;
-    iov[2].iov_len = sizeof(db->header.nodes);
+    iov[2].iov_base = &db->header.key_nums;
+    iov[2].iov_len = sizeof(db->header.key_nums);
     iov[3].iov_base = &db->header.root_off;
     iov[3].iov_len = sizeof(db->header.root_off);
     iov[4].iov_base = &db->header.leaf_off;
@@ -404,4 +404,23 @@ void translation_table::free_value(value_t *value)
         }
     }
     delete value;
+}
+
+void translation_table::free_node(node *node)
+{
+    off_t off = to_off(node);
+    change_list.erase(node);
+    cache_list.erase(translation_to_node[off].pos);
+    translation_to_off.erase(node);
+    translation_to_node.erase(off);
+    free_page(off);
+}
+
+void translation_table::release_root(node *root)
+{
+    off_t off = to_off(root);
+    cache_list.erase(translation_to_node[off].pos);
+    translation_to_node[off].x.release();
+    translation_to_node.erase(off);
+    translation_to_off.erase(root);
 }
