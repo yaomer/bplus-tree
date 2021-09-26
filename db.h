@@ -5,8 +5,12 @@
 #include <vector>
 
 #include <limits.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
 
 #include "disk.h"
+#include "page.h"
 
 namespace bplus_tree_db {
 
@@ -18,6 +22,8 @@ struct header_t {
     off_t leaf_off = 0;
     off_t free_list_head = page_size;
     size_t free_pages = 0;
+    off_t over_page_list_head = 0;
+    size_t over_pages = 0;
 };
 
 struct limits {
@@ -98,12 +104,12 @@ struct node {
 
 class DB {
 public:
-    DB() : translation_table("dump.bpt", this)
+    DB() : filename("dump.bpt"), translation_table(this), page_manager(this)
     {
         init();
     }
     DB(const std::string& filename)
-        : translation_table(filename, this)
+        : filename(filename), translation_table(this), page_manager(this)
     {
         init();
     }
@@ -189,11 +195,15 @@ private:
         return !comparator(l, r) && !comparator(r, l);
     }
 
+    int fd;
+    std::string filename;
     header_t header;
     std::unique_ptr<node> root; // 根节点常驻内存
     translation_table translation_table;
+    page_manager page_manager;
     Comparator comparator;
     friend class translation_table;
+    friend class page_manager;
 };
 }
 

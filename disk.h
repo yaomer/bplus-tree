@@ -19,14 +19,12 @@ typedef std::string value_t;
 // 转换表中并不保存根节点
 class translation_table {
 public:
-    translation_table(const std::string& filename, DB *db);
+    translation_table(DB *db);
     ~translation_table() { lru_flush(); }
     translation_table(const translation_table&) = delete;
     translation_table& operator=(const translation_table&) = delete;
 
     void set_cache_cap(int cap) { lru_cap = std::max(128, cap); }
-    off_t alloc_page();
-    void free_page(off_t off);
     node *load_node(off_t off);
     void free_node(node *node);
     void free_value(value_t *value);
@@ -58,8 +56,6 @@ private:
     void save_value(std::string& buf, value_t *value);
     value_t *load_value(char **ptr);
 
-    int fd;
-    std::string filename;
     DB *db; // we need `header` and `root`
     // 双向转换表
     std::unordered_map<off_t, cache_node> translation_to_node;

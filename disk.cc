@@ -1,20 +1,13 @@
-#include <unistd.h>
-#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
-#include <errno.h>
 
 #include "db.h"
 
 using namespace bplus_tree_db;
 
-translation_table::translation_table(const std::string& filename, DB *db)
-    : filename(filename), db(db), lru_cap(1024)
+translation_table::translation_table(DB *db)
+    : db(db), lru_cap(1024)
 {
-    fd = open(filename.c_str(), O_RDWR | O_CREAT, 0644);
-    if (fd < 0) {
-        panic("open(%s) error: %s", filename.c_str(), strerror(errno));
-    }
     load_header();
 }
 
@@ -70,7 +63,7 @@ void translation_table::lru_flush()
         save_node(db->header.root_off, db->root.get());
     }
     save_header();
-    fsync(fd);
+    fsync(db->fd);
 }
 
 node *translation_table::to_node(off_t off)
@@ -102,11 +95,12 @@ void translation_table::flush()
     }
     change_list.clear();
     save_header();
-    fsync(fd);
+    fsync(db->fd);
 }
 
 // ########################### file-header ###########################
 // [magic][page-size][key-nums][root-off][leaf-off][free-list-head][free-pages]
+// [over-page-list-head][over-pages]
 void translation_table::fill_header(struct iovec *iov)
 {
     iov[0].iov_base = &db->header.magic;
@@ -123,53 +117,34 @@ void translation_table::fill_header(struct iovec *iov)
     iov[5].iov_len = sizeof(db->header.free_list_head);
     iov[6].iov_base = &db->header.free_pages;
     iov[6].iov_len = sizeof(db->header.free_pages);
+    iov[7].iov_base = &db->header.over_page_list_head;
+    iov[7].iov_len = sizeof(db->header.over_page_list_head);
+    iov[8].iov_base = &db->header.over_pages;
+    iov[8].iov_len = sizeof(db->header.over_pages);
 }
 
 void translation_table::save_header()
 {
-    struct iovec iov[7];
+    struct iovec iov[9];
     fill_header(iov);
-    lseek(fd, 0, SEEK_SET);
-    writev(fd, iov, 7);
+    lseek(db->fd, 0, SEEK_SET);
+    writev(db->fd, iov, 9);
 }
 
 void translation_table::load_header()
 {
     int8_t magic;
     struct stat st;
-    fstat(fd, &st);
+    fstat(db->fd, &st);
     if (st.st_size == 0) return;
-    read(fd, &magic, sizeof(magic));
+    read(db->fd, &magic, sizeof(magic));
     if (magic != db->header.magic) {
-        panic("unknown data file <%s>", filename.c_str());
+        panic("unknown data file <%s>", db->filename.c_str());
     }
-    struct iovec iov[7];
+    struct iovec iov[9];
     fill_header(iov);
-    lseek(fd, 0, SEEK_SET);
-    readv(fd, iov, 7);
-}
-
-// ############################# page #############################
-
-off_t translation_table::alloc_page()
-{
-    off_t off = db->header.free_list_head;
-    if (db->header.free_pages > 0) {
-        db->header.free_pages--;
-        lseek(fd, off, SEEK_SET);
-        read(fd, &db->header.free_list_head, sizeof(db->header.free_list_head));
-    } else {
-        db->header.free_list_head += db->header.page_size;
-    }
-    return off;
-}
-
-void translation_table::free_page(off_t off)
-{
-    lseek(fd, off, SEEK_SET);
-    write(fd, &db->header.free_list_head, sizeof(db->header.free_list_head));
-    db->header.free_list_head = off;
-    db->header.free_pages++;
+    lseek(db->fd, 0, SEEK_SET);
+    readv(db->fd, iov, 9);
 }
 
 // ############################# encoding #############################
@@ -268,9 +243,9 @@ void translation_table::save_node(off_t off, node *node)
             encodeoff(buf, child_off);
         }
     }
-    lseek(fd, off, SEEK_SET);
+    lseek(db->fd, off, SEEK_SET);
     // 如果没有写满一页的话，也不会有什么问题，文件空洞是允许的
-    write(fd, buf.data(), buf.size());
+    write(db->fd, buf.data(), buf.size());
 }
 
 void translation_table::save_value(std::string& buf, value_t *value)
@@ -291,7 +266,7 @@ void translation_table::save_value(std::string& buf, value_t *value)
     }
     // 如果是新插入的值，那么我们就需要为所有数据分配新页，并全部写入磁盘
     // [value-len][over-page-off][value]
-    off_t off = alloc_page();
+    off_t off = db->page_manager.alloc_page();
     encodeoff(buf, off);
     buf.append(value->data(), pos);
     over_page_off.emplace(value, off);
@@ -306,21 +281,21 @@ void translation_table::save_value(std::string& buf, value_t *value)
 
     for (int i = 0; i < pages.size(); i++) {
         struct iovec iov[2];
-        off_t next_off = i == pages.size() - 1 ? 0 : alloc_page();
+        off_t next_off = i == pages.size() - 1 ? 0 : db->page_manager.alloc_page();
         iov[0].iov_base = &next_off;
         iov[0].iov_len = sizeof(next_off);
         iov[1].iov_base = value->data() + pos;
         iov[1].iov_len = pages[i];
         pos += pages[i];
-        lseek(fd, off, SEEK_SET);
-        writev(fd, iov, 2);
+        lseek(db->fd, off, SEEK_SET);
+        writev(db->fd, iov, 2);
         off = next_off;
     }
 }
 
 node *translation_table::load_node(off_t off)
 {
-    void *start = mmap(nullptr, db->header.page_size, PROT_READ, MAP_SHARED, fd, off);
+    void *start = mmap(nullptr, db->header.page_size, PROT_READ, MAP_SHARED, db->fd, off);
     if (start == MAP_FAILED) {
         panic("load node failed from off=%lld: %s", off, strerror(errno));
     }
@@ -371,7 +346,7 @@ value_t *translation_table::load_value(char **ptr)
     size_t cap_of_page = db->header.page_size - limit.off_field;
 
     while (true) {
-        void *start = mmap(nullptr, db->header.page_size, PROT_READ, MAP_SHARED, fd, off);
+        void *start = mmap(nullptr, db->header.page_size, PROT_READ, MAP_SHARED, db->fd, off);
         if (start == MAP_FAILED) {
             panic("load page failed from off=%lld: %s", off, strerror(errno));
         }
@@ -395,10 +370,10 @@ void translation_table::free_value(value_t *value)
         off_t off = over_page_off[value];
         over_page_off.erase(value);
         while (true) {
-            lseek(fd, off, SEEK_SET);
+            lseek(db->fd, off, SEEK_SET);
             off_t next_off;
-            read(fd, &next_off, sizeof(off_t));
-            if (off > 0) free_page(off);
+            read(db->fd, &next_off, sizeof(off_t));
+            if (off > 0) db->page_manager.free_page(off);
             off = next_off;
             if (off == 0) break;
         }
@@ -413,7 +388,7 @@ void translation_table::free_node(node *node)
     cache_list.erase(translation_to_node[off].pos);
     translation_to_off.erase(node);
     translation_to_node.erase(off);
-    free_page(off);
+    db->page_manager.free_page(off);
 }
 
 void translation_table::release_root(node *root)

@@ -26,9 +26,13 @@ void DB::init()
     comparator = [](const key_t& l, const key_t& r) {
         return std::less<key_t>()(l, r);
     };
+    fd = open(filename.c_str(), O_RDWR | O_CREAT, 0644);
+    if (fd < 0) {
+        panic("open(%s) error: %s", filename.c_str(), strerror(errno));
+    }
     limit.over_value = header.page_size / 16;
     if (header.root_off == 0) {
-        header.root_off = translation_table.alloc_page();
+        header.root_off = page_manager.alloc_page();
         header.leaf_off = header.root_off;
         root.reset(new node(true));
     } else {
@@ -82,7 +86,7 @@ void DB::insert(const key_t& key, const value_t& value)
         root->resize(1);
         root->childs[0] = header.root_off;
         translation_table.put(header.root_off, r);
-        header.root_off = translation_table.alloc_page();
+        header.root_off = page_manager.alloc_page();
         split(root.get(), 0);
     }
     insert(root.get(), key, value);
@@ -157,7 +161,7 @@ node *DB::split(node *x)
     int n = x->keys.size();
     int t = ceil(n / 2.0);
     node *y = new node(x->leaf);
-    translation_table.put(translation_table.alloc_page(), y);
+    translation_table.put(page_manager.alloc_page(), y);
     y->resize(n - t);
     for (int i = t; i < n; i++) {
         y->copy(i - t, x, i);
@@ -175,7 +179,7 @@ void DB::erase(const key_t& key)
         node *r = to_node(root->childs[0]);
         translation_table.release_root(r);
         root.reset(r);
-        translation_table.free_page(header.root_off);
+        page_manager.free_page(header.root_off);
         header.root_off = to_off(r);
     }
     translation_table.flush();
