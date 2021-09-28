@@ -31,6 +31,8 @@ void DB::init()
         panic("open(%s) error: %s", filename.c_str(), strerror(errno));
     }
     limit.over_value = header.page_size / 16;
+    translation_table.init();
+    page_manager.init();
     if (header.root_off == 0) {
         header.root_off = page_manager.alloc_page();
         header.leaf_off = header.root_off;
@@ -156,6 +158,8 @@ void DB::split(node *x, int i)
     x->update();
 }
 
+// 节点分裂是从中间分裂
+// 这意味着顺序插入操作可能会导致x中大约一半的空间后面无法被利用
 node *DB::split(node *x)
 {
     int n = x->keys.size();
@@ -176,11 +180,12 @@ void DB::erase(const key_t& key)
 {
     erase(root.get(), key, nullptr);
     if (!root->leaf && root->keys.size() == 1) {
-        node *r = to_node(root->childs[0]);
+        off_t off = root->childs[0];
+        node *r = to_node(off);
         translation_table.release_root(r);
         root.reset(r);
         page_manager.free_page(header.root_off);
-        header.root_off = to_off(r);
+        header.root_off = off;
     }
     translation_table.flush();
 }

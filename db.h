@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <assert.h>
 
 #include "disk.h"
 #include "page.h"

@@ -8,6 +8,8 @@
 
 #include <sys/uio.h>
 
+#include "page.h"
+
 namespace bplus_tree_db {
 
 class DB;
@@ -19,11 +21,12 @@ typedef std::string value_t;
 // 转换表中并不保存根节点
 class translation_table {
 public:
-    translation_table(DB *db);
+    translation_table(DB *db) : db(db), lru_cap(1024) {  }
     ~translation_table() { lru_flush(); }
     translation_table(const translation_table&) = delete;
     translation_table& operator=(const translation_table&) = delete;
 
+    void init();
     void set_cache_cap(int cap) { lru_cap = std::max(128, cap); }
     node *load_node(off_t off);
     void free_node(node *node);
@@ -66,7 +69,7 @@ private:
     int lru_cap;
     // 记录载入内存中的哪些value有溢出页
     // 如果不是新插入的value，那么对于溢出页中的数据是不需要重写入磁盘的
-    std::unordered_map<value_t*, off_t> over_page_off;
+    std::unordered_map<value_t*, over_page_off_t> over_page_off;
 };
 }
 

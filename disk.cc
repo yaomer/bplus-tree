@@ -2,11 +2,11 @@
 #include <sys/mman.h>
 
 #include "db.h"
+#include "codec.h"
 
 using namespace bplus_tree_db;
 
-translation_table::translation_table(DB *db)
-    : db(db), lru_cap(1024)
+void translation_table::init()
 {
     load_header();
 }
@@ -80,7 +80,11 @@ node *translation_table::to_node(off_t off)
 off_t translation_table::to_off(node *node)
 {
     if (node == db->root.get()) return db->header.root_off;
-    return translation_to_off.find(node)->second;
+    auto it = translation_to_off.find(node);
+    if (it == translation_to_off.end()) {
+        panic("to_off(%p)", node);
+    }
+    return it->second;
 }
 
 // 将每次修改操作涉及到的所有dirty node写回磁盘
@@ -147,56 +151,6 @@ void translation_table::load_header()
     readv(db->fd, iov, 9);
 }
 
-// ############################# encoding #############################
-
-static void encode8(std::string& buf, uint8_t n)
-{
-    buf.append(reinterpret_cast<char*>(&n), 1);
-}
-
-static void encode16(std::string& buf, uint16_t n)
-{
-    buf.append(reinterpret_cast<char*>(&n), 2);
-}
-
-static void encode32(std::string& buf, uint32_t n)
-{
-    buf.append(reinterpret_cast<char*>(&n), 4);
-}
-
-static void encodeoff(std::string& buf, off_t off)
-{
-    buf.append(reinterpret_cast<char*>(&off), sizeof(off));
-}
-
-static uint8_t decode8(char **ptr)
-{
-    uint8_t n = *reinterpret_cast<uint8_t*>(*ptr);
-    *ptr += 1;
-    return n;
-}
-
-static uint16_t decode16(char **ptr)
-{
-    uint16_t n = *reinterpret_cast<uint16_t*>(*ptr);
-    *ptr += 2;
-    return n;
-}
-
-static uint32_t decode32(char **ptr)
-{
-    uint32_t n = *reinterpret_cast<uint32_t*>(*ptr);
-    *ptr += 4;
-    return n;
-}
-
-static off_t decodeoff(char **ptr)
-{
-    off_t n = *reinterpret_cast<off_t*>(*ptr);
-    *ptr += sizeof(n);
-    return n;
-}
-
 // ############################# node #############################
 // [leaf]
 // [key-nums]
@@ -256,32 +210,51 @@ void translation_table::save_value(std::string& buf, value_t *value)
         buf.append(*value);
         return;
     }
-    size_t pos = limit.over_value - limit.off_field;
+    // over-value:
+    // -----------------------------------------------------------------
+    // |  4 bytes  |   8 bytes     |  2 bytes   | limit.over_value - 10 |
+    // | value-len | over-page-off | remain-off |        value          |
+    // -----------------------------------------------------------------
+    // over-page: [next-over-page-off][data]
+    size_t pos = limit.over_value - limit.off_field - 2;
     auto it = over_page_off.find(value);
     // 我们只需将存储到叶节点本身的部分数据写入磁盘即可
     if (it != over_page_off.end()) {
-        encodeoff(buf, it->second);
+        auto [page_off, remain_off] = it->second;
+        encodeoff(buf, page_off);
+        encode16(buf, remain_off);
         buf.append(value->data(), pos);
         return;
     }
-    // 如果是新插入的值，那么我们就需要为所有数据分配新页，并全部写入磁盘
-    // [value-len][over-page-off][value]
-    off_t off = db->page_manager.alloc_page();
-    encodeoff(buf, off);
-    buf.append(value->data(), pos);
-    over_page_off.emplace(value, off);
-    // 剩余的数据将被以分页的形式写入多个溢出页中，多个溢出页之间链式相连
-    // over-page -> [next-over-page-off][value]
-    size_t remain_bytes = len - pos;
+    // 对于剩下的存储到溢出页的数据，我们将根据页大小进行分块
+    len -= pos;
     size_t cap_of_page = db->header.page_size - limit.off_field;
-    size_t n = remain_bytes / cap_of_page;
-    size_t r = remain_bytes % cap_of_page;
+    size_t n = len / cap_of_page;
+    uint16_t r = len % cap_of_page;
     std::vector<size_t> pages(n, cap_of_page);
-    if (r > 0) pages.push_back(r);
+    // 剩下的r恰好无法放到shared-over-page中
+    if (r > cap_of_page - 8) {
+        pages.push_back(r);
+        r = 0;
+    }
 
-    for (int i = 0; i < pages.size(); i++) {
+    over_page_off_t over_page;
+    if (r > 0) {
+        over_page = db->page_manager.write_over_page(value->data() + pos + n * cap_of_page, r);
+    }
+
+    n = pages.size();
+    off_t page_off = n > 0 ? db->page_manager.alloc_page() : over_page.first;
+
+    off_t off = page_off;
+    for (int i = 0; i < n; i++) {
         struct iovec iov[2];
-        off_t next_off = i == pages.size() - 1 ? 0 : db->page_manager.alloc_page();
+        off_t next_off;
+        if (i == n - 1) {
+            next_off = r > 0 ? over_page.first : 0;
+        } else {
+            next_off = db->page_manager.alloc_page();
+        }
         iov[0].iov_base = &next_off;
         iov[0].iov_len = sizeof(next_off);
         iov[1].iov_base = value->data() + pos;
@@ -291,6 +264,11 @@ void translation_table::save_value(std::string& buf, value_t *value)
         writev(db->fd, iov, 2);
         off = next_off;
     }
+
+    encodeoff(buf, page_off);
+    encode16(buf, over_page.second);
+    buf.append(value->data(), limit.over_value - limit.off_field - 2);
+    over_page_off[value] = { page_off, over_page.second };
 }
 
 node *translation_table::load_node(off_t off)
@@ -337,12 +315,13 @@ value_t *translation_table::load_value(char **ptr)
     }
     value_t *value = new value_t();
     off_t off = decodeoff(ptr);
-    over_page_off.emplace(value, off);
-    size_t n = limit.over_value - limit.off_field;
+    uint16_t remain_off = decode16(ptr);
+    over_page_off[value] = { off, remain_off };
+    size_t n = limit.over_value - limit.off_field - sizeof(remain_off);
     value->append(*ptr, n);
     *ptr += n;
+    len -= n;
 
-    size_t remain_bytes = len - n;
     size_t cap_of_page = db->header.page_size - limit.off_field;
 
     while (true) {
@@ -352,11 +331,16 @@ value_t *translation_table::load_value(char **ptr)
         }
         char *buf = reinterpret_cast<char*>(start);
         off = decodeoff(&buf);
-        if (remain_bytes >= cap_of_page) {
+        if (len >= cap_of_page) {
             value->append(buf, cap_of_page);
-            remain_bytes -= cap_of_page;
+            len -= cap_of_page;
         } else {
-            value->append(buf, remain_bytes);
+            if (len <= cap_of_page - 8) {
+                value->append(buf - sizeof(off) + remain_off, len);
+            } else {
+                value->append(buf, len);
+            }
+            off = 0;
         }
         munmap(start, db->header.page_size);
         if (off == 0) break;
@@ -366,16 +350,28 @@ value_t *translation_table::load_value(char **ptr)
 
 void translation_table::free_value(value_t *value)
 {
-    if (value->size() > limit.over_value) {
-        off_t off = over_page_off[value];
+    size_t len = value->size();
+    if (len > limit.over_value) {
+        auto [off, remain_off] = over_page_off[value];
+        len -= (limit.over_value - limit.off_field - sizeof(remain_off));
+        size_t cap_of_page = db->header.page_size - limit.off_field;
         over_page_off.erase(value);
         while (true) {
-            lseek(db->fd, off, SEEK_SET);
             off_t next_off;
+            lseek(db->fd, off, SEEK_SET);
             read(db->fd, &next_off, sizeof(off_t));
-            if (off > 0) db->page_manager.free_page(off);
-            off = next_off;
-            if (off == 0) break;
+            if (len >= cap_of_page) {
+                db->page_manager.free_page(off);
+                len -= cap_of_page;
+                if (next_off == 0) break;
+                off = next_off;
+            } else {
+                if (len <= cap_of_page - 8)
+                    db->page_manager.free_over_page(off, remain_off, len);
+                else
+                    db->page_manager.free_page(off);
+                break;
+            }
         }
     }
     delete value;
@@ -394,6 +390,7 @@ void translation_table::free_node(node *node)
 void translation_table::release_root(node *root)
 {
     off_t off = to_off(root);
+    change_list.erase(db->root.get());
     cache_list.erase(translation_to_node[off].pos);
     translation_to_node[off].x.release();
     translation_to_node.erase(off);
