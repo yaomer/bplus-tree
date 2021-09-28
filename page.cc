@@ -256,7 +256,7 @@ void page_manager::free_over_page(off_t off, uint16_t freep, uint16_t n)
             if (prev_off + prev_size == freep) {
                 prev_size += n;
                 memcpy(buf + prev_off, &next_off, sizeof(next_off));
-                memcpy(buf + prev_off + 2, &n, sizeof(n));
+                memcpy(buf + prev_off + 2, &prev_size, sizeof(prev_size));
             }
         } else {
             memcpy(buf + freep, &cur_off, sizeof(cur_off));
