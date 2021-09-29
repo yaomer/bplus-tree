@@ -59,7 +59,9 @@ private:
     void save_value(std::string& buf, value_t *value);
     value_t *load_value(char **ptr);
 
-    DB *db; // we need `header` and `root`
+    void clear();
+
+    DB *db;
     // 双向转换表
     std::unordered_map<off_t, cache_node> translation_to_node;
     std::unordered_map<node*, off_t> translation_to_off;

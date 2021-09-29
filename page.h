@@ -21,6 +21,7 @@ public:
     void free_over_page(off_t off, uint16_t freep, uint16_t n);
 private:
     DB *db;
+    void clear();
     // 加快查找header.over_page_list_head
     struct over_page_info {
         off_t prev_off, next_off;

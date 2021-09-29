@@ -8,6 +8,7 @@ using namespace bplus_tree_db;
 
 void page_manager::init()
 {
+    clear();
     // build over_page_map and avail_map
     off_t off = db->header.over_page_list_head;
     over_page_info over_page;
@@ -26,6 +27,12 @@ void page_manager::init()
         over_page.prev_off = off;
         off = over_page.next_off;
     }
+}
+
+void page_manager::clear()
+{
+    over_page_map.clear();
+    avail_map.clear();
 }
 
 // 分配一个新页，有3种用途：

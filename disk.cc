@@ -8,7 +8,17 @@ using namespace bplus_tree_db;
 
 void translation_table::init()
 {
+    clear();
     load_header();
+}
+
+void translation_table::clear()
+{
+    translation_to_node.clear();
+    translation_to_off.clear();
+    cache_list.clear();
+    change_list.clear();
+    over_page_off.clear();
 }
 
 node *translation_table::lru_get(off_t off)
@@ -59,9 +69,9 @@ void translation_table::lru_flush()
         }
     }
     translation_to_node.clear();
-    if (db->root->dirty) {
-        save_node(db->header.root_off, db->root.get());
-    }
+    // 就算什么也没做，我们也强制flush一次根节点
+    // 以便重启后可以成功load根节点
+    save_node(db->header.root_off, db->root.get());
     save_header();
     fsync(db->fd);
 }

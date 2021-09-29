@@ -160,10 +160,11 @@ public:
     void set_page_size(int page_size);
     void set_page_cache_slots(int slots);
 
-    iterator first() { return iterator(this, header.leaf_off, 0); }
+    iterator first() { return header.key_nums > 0 ? iterator(this, header.leaf_off, 0) : iterator(this); }
     iterator find(const key_t& key) { return find(root.get(), key); }
     void insert(const key_t& key, const value_t& value);
     void erase(const key_t& key);
+    void rebuild();
 private:
     void init();
 

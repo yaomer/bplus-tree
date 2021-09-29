@@ -338,3 +338,16 @@ bool DB::check_limit(const key_t& key, const value_t& value)
     }
     return true;
 }
+
+void DB::rebuild()
+{
+    char tmpfile[] = "tmp.XXXXXX";
+    mktemp(tmpfile);
+    DB *tmpdb = new DB(tmpfile);
+    for (auto it = first(); it.valid(); it.next()) {
+        tmpdb->insert(*it.key(), *it.value());
+    }
+    delete tmpdb;
+    rename(tmpfile, filename.c_str());
+    init();
+}
