@@ -35,7 +35,6 @@ struct limits {
     const size_t key_nums_field = 2;
     const size_t key_len_field = 1;
     const size_t value_len_field = 4;
-    const size_t off_field = sizeof(off_t);
     // 如果一个value的长度超过了over_value，那么超出的部分将被存放到溢出页
     // 由header.page_size决定
     size_t over_value;
@@ -49,7 +48,7 @@ struct node {
     node(bool leaf) : leaf(leaf)
     {
         page_used = limit.type_field + limit.key_nums_field;
-        if (leaf) page_used += limit.off_field * 2; // left and right
+        if (leaf) page_used += sizeof(off_t) * 2; // left and right
     }
     ~node()
     {

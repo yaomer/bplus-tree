@@ -179,9 +179,9 @@ void node::update(bool dirty)
         for (auto& value : values)  {
             page_used += limit.value_len_field + std::min(limit.over_value, value->size());
         }
-        page_used += limit.off_field * 2;
+        page_used += sizeof(off_t) * 2;
     } else {
-        page_used += limit.off_field * childs.size();
+        page_used += sizeof(off_t) * childs.size();
     }
     this->dirty = dirty;
 }
@@ -212,6 +212,11 @@ void translation_table::save_node(off_t off, node *node)
     write(db->fd, buf.data(), buf.size());
 }
 
+#define CAP_OF_OVER_PAGE (db->header.page_size - sizeof(off_t))
+#define CAP_OF_SHARED_OVER_PAGE (CAP_OF_OVER_PAGE - 8)
+
+#define OVER_VALUE_LEN (limit.over_value - sizeof(off_t) - 2)
+
 void translation_table::save_value(std::string& buf, value_t *value)
 {
     uint32_t len = value->size();
@@ -226,7 +231,7 @@ void translation_table::save_value(std::string& buf, value_t *value)
     // | value-len | over-page-off | remain-off |        value          |
     // -----------------------------------------------------------------
     // over-page: [next-over-page-off][data]
-    size_t pos = limit.over_value - limit.off_field - 2;
+    size_t pos = OVER_VALUE_LEN;
     auto it = over_page_off.find(value);
     // 我们只需将存储到叶节点本身的部分数据写入磁盘即可
     if (it != over_page_off.end()) {
@@ -238,19 +243,19 @@ void translation_table::save_value(std::string& buf, value_t *value)
     }
     // 对于剩下的存储到溢出页的数据，我们将根据页大小进行分块
     len -= pos;
-    size_t cap_of_page = db->header.page_size - limit.off_field;
-    size_t n = len / cap_of_page;
-    uint16_t r = len % cap_of_page;
-    std::vector<size_t> pages(n, cap_of_page);
+    size_t n = len / CAP_OF_OVER_PAGE;
+    uint16_t r = len % CAP_OF_OVER_PAGE;
+    std::vector<size_t> pages(n, CAP_OF_OVER_PAGE);
     // 剩下的r恰好无法放到shared-over-page中
-    if (r > cap_of_page - 8) {
+    if (r > CAP_OF_SHARED_OVER_PAGE) {
         pages.push_back(r);
         r = 0;
     }
 
     over_page_off_t over_page;
     if (r > 0) {
-        over_page = db->page_manager.write_over_page(value->data() + pos + n * cap_of_page, r);
+        size_t roff = pos + n * CAP_OF_OVER_PAGE;
+        over_page = db->page_manager.write_over_page(value->data() + roff, r);
     }
 
     n = pages.size();
@@ -274,10 +279,9 @@ void translation_table::save_value(std::string& buf, value_t *value)
         writev(db->fd, iov, 2);
         off = next_off;
     }
-
     encodeoff(buf, page_off);
     encode16(buf, over_page.second);
-    buf.append(value->data(), limit.over_value - limit.off_field - 2);
+    buf.append(value->data(), OVER_VALUE_LEN);
     over_page_off[value] = { page_off, over_page.second };
 }
 
@@ -327,12 +331,10 @@ value_t *translation_table::load_value(char **ptr)
     off_t off = decodeoff(ptr);
     uint16_t remain_off = decode16(ptr);
     over_page_off[value] = { off, remain_off };
-    size_t n = limit.over_value - limit.off_field - sizeof(remain_off);
+    size_t n = OVER_VALUE_LEN;
     value->append(*ptr, n);
     *ptr += n;
     len -= n;
-
-    size_t cap_of_page = db->header.page_size - limit.off_field;
 
     while (true) {
         void *start = mmap(nullptr, db->header.page_size, PROT_READ, MAP_SHARED, db->fd, off);
@@ -341,11 +343,11 @@ value_t *translation_table::load_value(char **ptr)
         }
         char *buf = reinterpret_cast<char*>(start);
         off = decodeoff(&buf);
-        if (len >= cap_of_page) {
-            value->append(buf, cap_of_page);
-            len -= cap_of_page;
+        if (len >= CAP_OF_OVER_PAGE) {
+            value->append(buf, CAP_OF_OVER_PAGE);
+            len -= CAP_OF_OVER_PAGE;
         } else {
-            if (len <= cap_of_page - 8) {
+            if (len <= CAP_OF_SHARED_OVER_PAGE) {
                 value->append(buf - sizeof(off) + remain_off, len);
             } else {
                 value->append(buf, len);
@@ -363,20 +365,19 @@ void translation_table::free_value(value_t *value)
     size_t len = value->size();
     if (len > limit.over_value) {
         auto [off, remain_off] = over_page_off[value];
-        len -= (limit.over_value - limit.off_field - sizeof(remain_off));
-        size_t cap_of_page = db->header.page_size - limit.off_field;
+        len -= OVER_VALUE_LEN;
         over_page_off.erase(value);
         while (true) {
             off_t next_off;
             lseek(db->fd, off, SEEK_SET);
             read(db->fd, &next_off, sizeof(off_t));
-            if (len >= cap_of_page) {
+            if (len >= CAP_OF_OVER_PAGE) {
                 db->page_manager.free_page(off);
-                len -= cap_of_page;
+                len -= CAP_OF_OVER_PAGE;
                 if (next_off == 0) break;
                 off = next_off;
             } else {
-                if (len <= cap_of_page - 8)
+                if (len <= CAP_OF_SHARED_OVER_PAGE)
                     db->page_manager.free_over_page(off, remain_off, len);
                 else
                     db->page_manager.free_page(off);

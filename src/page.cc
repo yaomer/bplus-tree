@@ -3,6 +3,7 @@
 #include "codec.h"
 
 #include <sys/mman.h>
+#include <sys/stat.h>
 
 using namespace bplus_tree_db;
 
@@ -68,7 +69,7 @@ void page_manager::free_page(off_t off)
     db->header.free_pages++;
 }
 
-#define OVER_PAGE_AVAIL_OFF (sizeof(limit.off_field) + 2 + 2)
+#define OVER_PAGE_AVAIL_OFF (sizeof(off_t) + 2 + 2)
 
 #define ASSERT_AVAIL(avail) (assert((avail) + OVER_PAGE_AVAIL_OFF <= db->header.page_size))
 
@@ -91,9 +92,9 @@ inline uint16_t round4(uint16_t n)
 over_page_off_t page_manager::write_over_page(const char *data, uint16_t n)
 {
     ASSERT_AVAIL(n);
-    n = round4(n); // n会被向上取整到4的倍数
-    auto it = avail_map.lower_bound(n);
-    if (it == avail_map.end()) { // 没有找到剩余可用大小至少为n的页
+    uint16_t round_n = round4(n); // n会被向上取整到4的倍数
+    auto it = avail_map.lower_bound(round_n);
+    if (it == avail_map.end()) { // 没有找到剩余可用大小至少为round_n的页
         return write_new_over_page(data, n);
     }
     for ( ; it != avail_map.end(); ++it) {
@@ -112,18 +113,30 @@ over_page_off_t page_manager::write_over_page(const char *data, uint16_t n)
     return write_new_over_page(data, n);
 }
 
+void page_manager::growth_file(off_t off)
+{
+    struct stat st;
+    fstat(db->fd, &st);
+    if (off + db->header.page_size > st.st_size)
+        ftruncate(db->fd, off + db->header.page_size);
+}
+
 // 分配一个新页，并写入data[n]
 over_page_off_t page_manager::write_new_over_page(const char *data, uint16_t n)
 {
     off_t off = alloc_page();
+    // 因为如果mmap()映射的区域超出了文件大小，那么我们读写超出的区域就是非法的
+    // 所以如有必要，我们需要事先增长文件大小
+    growth_file(off);
+    uint16_t round_n = round4(n);
     db->header.over_pages++;
     lseek(db->fd, off, SEEK_SET);
     over_page_info over_page;
     over_page.prev_off = 0;
     over_page.next_off = db->header.over_page_list_head;
-    over_page.avail = db->header.page_size - OVER_PAGE_AVAIL_OFF - n;
-    over_page.free_block_head = OVER_PAGE_AVAIL_OFF + n;
-    struct iovec iov[6];
+    over_page.avail = db->header.page_size - OVER_PAGE_AVAIL_OFF - round_n;
+    over_page.free_block_head = OVER_PAGE_AVAIL_OFF + round_n;
+    struct iovec iov[7];
     iov[0].iov_base = &over_page.next_off;
     iov[0].iov_len = sizeof(over_page.next_off);
     iov[1].iov_base = &over_page.avail;
@@ -132,12 +145,15 @@ over_page_off_t page_manager::write_new_over_page(const char *data, uint16_t n)
     iov[2].iov_len = sizeof(over_page.free_block_head);
     iov[3].iov_base = const_cast<char*>(data);
     iov[3].iov_len = n;
+    std::string zeros(round_n - n, '\0');
+    iov[4].iov_base = const_cast<char*>(zeros.data());
+    iov[4].iov_len = zeros.size();
     uint16_t next_free_block_off = 0;
-    iov[4].iov_base = &next_free_block_off;
-    iov[4].iov_len = sizeof(next_free_block_off);
-    iov[5].iov_base = &over_page.avail;
-    iov[5].iov_len = sizeof(over_page.avail);
-    writev(db->fd, iov, 6);
+    iov[5].iov_base = &next_free_block_off;
+    iov[5].iov_len = sizeof(next_free_block_off);
+    iov[6].iov_base = &over_page.avail;
+    iov[6].iov_len = sizeof(over_page.avail);
+    writev(db->fd, iov, 7);
 
     db->header.over_page_list_head = off;
     if (over_page.next_off > 0) {
@@ -152,6 +168,7 @@ over_page_off_t page_manager::write_new_over_page(const char *data, uint16_t n)
 // 如果有的话，我们写入data[n]，并返回写入位置的页内偏移；否则就返回0
 uint16_t page_manager::search_and_try_write(off_t off, const char *data, uint16_t n)
 {
+    uint16_t round_n = round4(n);
     auto& over_page = over_page_map[off];
     // 我们这里使用PROT_WRITE以便直接修改溢出页
     void *start = mmap(nullptr, db->header.page_size, PROT_READ | PROT_WRITE, MAP_SHARED, db->fd, off);
@@ -159,20 +176,20 @@ uint16_t page_manager::search_and_try_write(off_t off, const char *data, uint16_
         panic("load page failed from off=%lld: %s", off, strerror(errno));
     }
     char *buf = reinterpret_cast<char*>(start);
-    off_t prev_off = 0;
-    off_t cur_off = over_page.free_block_head;
+    uint16_t prev_off = 0;
+    uint16_t cur_off = over_page.free_block_head;
     uint16_t avail = over_page.avail;
     while (true) {
         char *ptr = buf + cur_off;
         uint16_t next_off = decode16(&ptr);
         uint16_t cur_size = decode16(&ptr);
-        if (cur_size >= n) { // 找到了一个合适的块
+        if (cur_size >= round_n) { // 找到了一个合适的块
             // 将data[n]拷贝到cur_off处
             memcpy(buf + cur_off, data, n);
             // 如果还有剩余的，我们就将它插回到原空闲块链表中
-            uint16_t remain_size = cur_size - n;
+            uint16_t remain_size = cur_size - round_n;
             if (remain_size > 0) {
-                uint16_t new_off = cur_off + n;
+                uint16_t new_off = cur_off + round_n;
                 memcpy(buf + new_off, &next_off, sizeof(next_off));
                 memcpy(buf + new_off + 2, &remain_size, sizeof(remain_size));
                 next_off = new_off;
@@ -183,18 +200,18 @@ uint16_t page_manager::search_and_try_write(off_t off, const char *data, uint16_
             else
                 over_page.free_block_head = next_off;
             // 更新该页的剩余可用大小
-            over_page.avail -= n;
+            over_page.avail -= round_n;
             if (over_page.avail > 0) {
                 avail_map[over_page.avail].push_back(off);
             }
             // 更新该页的相关记录信息
-            memcpy(buf + limit.off_field, &over_page.avail, sizeof(over_page.avail));
-            memcpy(buf + limit.off_field + 2, &over_page.free_block_head, sizeof(over_page.free_block_head));
+            memcpy(buf + sizeof(off_t), &over_page.avail, sizeof(over_page.avail));
+            memcpy(buf + sizeof(off_t) + 2, &over_page.free_block_head, sizeof(over_page.free_block_head));
             break;
         }
         avail -= cur_size;
         // 剩下的块中已经找不到合适的了
-        if (avail < n) {
+        if (avail < round_n) {
             cur_off = 0;
             break;
         }
@@ -212,7 +229,8 @@ void page_manager::free_over_page(off_t off, uint16_t freep, uint16_t n)
     auto& over_page = over_page_map[off];
     ASSERT_AVAIL(over_page.avail + n);
     n = round4(n);
-    if (over_page.avail + n == db->header.page_size - OVER_PAGE_AVAIL_OFF) {
+    over_page.avail += n;
+    if (over_page.avail == db->header.page_size - OVER_PAGE_AVAIL_OFF) {
         // 如果该页没人使用了，就整个释放掉
         if (over_page.prev_off > 0) {
             lseek(db->fd, over_page.prev_off, SEEK_SET);
@@ -285,9 +303,8 @@ void page_manager::free_over_page(off_t off, uint16_t freep, uint16_t n)
         }
     }
 end:
-    over_page.avail += n;
-    memcpy(buf + limit.off_field, &over_page.avail, sizeof(over_page.avail));
-    memcpy(buf + limit.off_field + 2, &over_page.free_block_head, sizeof(over_page.free_block_head));
+    memcpy(buf + sizeof(off_t), &over_page.avail, sizeof(over_page.avail));
+    memcpy(buf + sizeof(off_t) + 2, &over_page.free_block_head, sizeof(over_page.free_block_head));
     avail_map[over_page.avail].push_back(off);
     munmap(start, db->header.page_size);
 }

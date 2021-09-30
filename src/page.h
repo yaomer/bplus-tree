@@ -28,6 +28,7 @@ private:
         uint16_t avail;
         uint16_t free_block_head;
     };
+    void growth_file(off_t off);
     over_page_off_t write_new_over_page(const char *data, uint16_t n);
     uint16_t search_and_try_write(off_t off, const char *data, uint16_t n);
     void remove_by_avail(off_t off, uint16_t avail);

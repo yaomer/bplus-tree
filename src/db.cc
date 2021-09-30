@@ -321,7 +321,7 @@ bool DB::isfull(node *x, const key_t& key, const value_t& value)
     if (x->leaf) {
         page_used += (limit.key_len_field + key.size()) + (limit.value_len_field + std::min(limit.over_value, value.size()));
     } else {
-        page_used += (limit.key_len_field + limit.max_key) + limit.off_field;
+        page_used += (limit.key_len_field + limit.max_key) + sizeof(off_t);
     }
     return page_used > header.page_size;
 }
