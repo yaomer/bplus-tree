@@ -166,6 +166,8 @@ node *DB::split(node *x)
     int t = ceil(n / 2.0);
     node *y = new node(x->leaf);
     translation_table.put(page_manager.alloc_page(), y);
+    translation_table.put_change_node(x);
+    translation_table.put_change_node(y);
     y->resize(n - t);
     for (int i = t; i < n; i++) {
         y->copy(i - t, x, i);
