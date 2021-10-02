@@ -35,7 +35,7 @@ void DB::init()
     page_manager.init();
     if (header.root_off == 0) {
         header.root_off = page_manager.alloc_page();
-        header.leaf_off = header.root_off;
+        header.leaf_off = header.last_off = header.root_off;
         root.reset(new node(true));
     } else {
         root.reset(translation_table.load_node(header.root_off));
@@ -67,6 +67,17 @@ void DB::set_page_cache_slots(int slots)
     translation_table.set_cache_cap(slots);
 }
 
+
+DB::iterator DB::first()
+{
+    return header.key_nums > 0 ? iterator(this, header.leaf_off, 0) : iterator(this);
+}
+
+DB::iterator DB::last()
+{
+    return header.key_nums > 0 ? iterator(this, header.last_off, to_node(header.last_off)->keys.size()-1) : iterator(this);
+}
+
 DB::iterator DB::find(node *x, const key_t& key)
 {
     int i = search(x, key);
@@ -89,7 +100,7 @@ void DB::insert(const key_t& key, const value_t& value)
         root->childs[0] = header.root_off;
         translation_table.put(header.root_off, r);
         header.root_off = page_manager.alloc_page();
-        split(root.get(), 0);
+        split(root.get(), 0, key);
     }
     insert(root.get(), key, value);
     translation_table.flush();
@@ -111,6 +122,7 @@ void DB::insert(node *x, const key_t& key, const value_t& value)
                 x->copy(j + 1, j);
             }
             if (less(key, to_node(header.leaf_off)->keys[0])) header.leaf_off = to_off(x);
+            if (less(to_node(header.last_off)->keys.back(), key)) header.last_off = to_off(x);
             x->keys[i] = key;
             x->values[i] = new value_t(value);
             header.key_nums++;
@@ -122,29 +134,101 @@ void DB::insert(node *x, const key_t& key, const value_t& value)
             x->update();
         }
         if (isfull(to_node(x->childs[i]), key, value)) {
-            split(x, i);
+            split(x, i, key);
+            // for mid-split, `last_off` should point to the split right child node
+            if (header.last_off == x->childs[i]) header.last_off = x->childs[i + 1];
             if (less(x->keys[i], key)) i++;
         }
         insert(to_node(x->childs[i]), key, value);
     }
 }
 
-void DB::split(node *x, int i)
+void DB::split(node *x, int i, const key_t& key)
 {
     node *y = to_node(x->childs[i]);
-    node *z = split(y);
+    int type = get_split_type(y, key);
+    node *z = split(y, type);
     int n = x->keys.size();
     x->resize(++n);
     for (int j = n - 1; j > i; j--) {
         x->copy(j, j - 1);
         if (j > i + 1) x->childs[j] = x->childs[j - 1];
     }
-    x->keys[i] = y->keys.back();
+    x->keys[i] = type == LEFT_INSERT_SPLIT ? key : y->keys.back();
     if (n == 2) {
-        x->keys[n - 1] = z->keys.back();
+        if (type == MID_SPLIT) x->keys[n - 1] = z->keys.back();
+        else if (type == RIGHT_INSERT_SPLIT) x->keys[n - 1] = key;
+        else x->keys[n - 1] = y->keys.back();
     }
     x->childs[i + 1] = to_off(z);
-    if (z->leaf) {
+    if (type == LEFT_INSERT_SPLIT)
+        std::swap(x->childs[i], x->childs[i + 1]);
+    if (z->leaf)
+        link_leaf(z, y, type);
+    x->update();
+    translation_table.put_change_node(x);
+    translation_table.put_change_node(y);
+    translation_table.put_change_node(z);
+}
+
+node *DB::split(node *x, int type)
+{
+    node *y = new node(x->leaf);
+    translation_table.put(page_manager.alloc_page(), y);
+    if (type == MID_SPLIT) {
+        int n = x->keys.size();
+        int point = ceil(n / 2.0);
+        y->resize(n - point);
+        for (int i = point; i < n; i++) {
+            y->copy(i - point, x, i);
+            if (!x->leaf) y->childs[i - point] = x->childs[i];
+        }
+        x->remove_from(point);
+        y->update();
+    }
+    return y;
+}
+
+// 节点分裂默认是从中间分裂
+// 这意味着顺序插入操作可能会导致x中大约一半的空间后面无法被利用
+// 针对这种情况，我们可以使用一种简单直接的办法来进行优化：
+// 当在叶节点的最左端或最右端插入时，我们就进行插入点分裂而非中间分裂
+// 1) right-insert-point-split
+// [1 2 3] (insert 4) -> [3 4]
+//                      /     \
+//                   [1 2 3]->[4]
+// 2) left-insert-point-split
+// [2 3 4] (insert 1) -> [1 4]
+//                      /     \
+//                     [1]->[2 3 4]
+int DB::get_split_type(node *x, const key_t& key)
+{
+    int type = MID_SPLIT;
+    if (x->leaf) {
+        node *leaf = to_node(header.leaf_off);
+        node *last = to_node(header.last_off);
+        if (x == last && less(last->keys.back(), key)) {
+            type = RIGHT_INSERT_SPLIT;
+        } else if (x == leaf && less(key, leaf->keys[0])) {
+            type = LEFT_INSERT_SPLIT;
+        }
+    }
+    return type;
+}
+
+void DB::link_leaf(node *z, node *y, int type)
+{
+    if (type == LEFT_INSERT_SPLIT) { // [z y]
+        z->right = to_off(y);
+        z->left = y->left;
+        if (y->left > 0) {
+            node *r = to_node(y->left);
+            translation_table.put_change_node(r);
+            r->right = to_off(z);
+            r->dirty = true;
+        }
+        y->left = to_off(z);
+    } else { // [y z]
         z->left = to_off(y);
         z->right = y->right;
         if (y->right > 0) {
@@ -155,27 +239,8 @@ void DB::split(node *x, int i)
         }
         y->right = to_off(z);
     }
-    x->update();
-}
-
-// 节点分裂是从中间分裂
-// 这意味着顺序插入操作可能会导致x中大约一半的空间后面无法被利用
-node *DB::split(node *x)
-{
-    int n = x->keys.size();
-    int t = ceil(n / 2.0);
-    node *y = new node(x->leaf);
-    translation_table.put(page_manager.alloc_page(), y);
-    translation_table.put_change_node(x);
-    translation_table.put_change_node(y);
-    y->resize(n - t);
-    for (int i = t; i < n; i++) {
-        y->copy(i - t, x, i);
-        if (!x->leaf) y->childs[i - t] = x->childs[i];
-    }
-    x->remove_from(t);
-    y->update();
-    return y;
+    z->dirty = true;
+    y->dirty = true;
 }
 
 void DB::erase(const key_t& key)
@@ -287,6 +352,7 @@ void DB::borrow_from_left(node *r, node *x, node *y, int i)
 void DB::merge(node *y, node *x)
 {
     if (header.leaf_off == to_off(x)) header.leaf_off = to_off(y);
+    if (header.last_off == to_off(x)) header.last_off = to_off(y);
     int xn = x->keys.size();
     int yn = y->keys.size();
     y->resize(yn + xn);

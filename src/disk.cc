@@ -113,8 +113,8 @@ void translation_table::flush()
 }
 
 // ########################### file-header ###########################
-// [magic][page-size][key-nums][root-off][leaf-off][free-list-head][free-pages]
-// [over-page-list-head][over-pages]
+// [magic][page-size][key-nums][root-off][leaf-off][last-off]
+// [free-list-head][free-pages][over-page-list-head][over-pages]
 void translation_table::fill_header(struct iovec *iov)
 {
     iov[0].iov_base = &db->header.magic;
@@ -127,22 +127,26 @@ void translation_table::fill_header(struct iovec *iov)
     iov[3].iov_len = sizeof(db->header.root_off);
     iov[4].iov_base = &db->header.leaf_off;
     iov[4].iov_len = sizeof(db->header.leaf_off);
-    iov[5].iov_base = &db->header.free_list_head;
-    iov[5].iov_len = sizeof(db->header.free_list_head);
-    iov[6].iov_base = &db->header.free_pages;
-    iov[6].iov_len = sizeof(db->header.free_pages);
-    iov[7].iov_base = &db->header.over_page_list_head;
-    iov[7].iov_len = sizeof(db->header.over_page_list_head);
-    iov[8].iov_base = &db->header.over_pages;
-    iov[8].iov_len = sizeof(db->header.over_pages);
+    iov[5].iov_base = &db->header.last_off;
+    iov[5].iov_len = sizeof(db->header.last_off);
+    iov[6].iov_base = &db->header.free_list_head;
+    iov[6].iov_len = sizeof(db->header.free_list_head);
+    iov[7].iov_base = &db->header.free_pages;
+    iov[7].iov_len = sizeof(db->header.free_pages);
+    iov[8].iov_base = &db->header.over_page_list_head;
+    iov[8].iov_len = sizeof(db->header.over_page_list_head);
+    iov[9].iov_base = &db->header.over_pages;
+    iov[9].iov_len = sizeof(db->header.over_pages);
 }
+
+#define HEADER_IOV_LEN 10
 
 void translation_table::save_header()
 {
-    struct iovec iov[9];
+    struct iovec iov[HEADER_IOV_LEN];
     fill_header(iov);
     lseek(db->fd, 0, SEEK_SET);
-    writev(db->fd, iov, 9);
+    writev(db->fd, iov, HEADER_IOV_LEN);
 }
 
 void translation_table::load_header()
@@ -155,10 +159,10 @@ void translation_table::load_header()
     if (magic != db->header.magic) {
         panic("unknown data file <%s>", db->filename.c_str());
     }
-    struct iovec iov[9];
+    struct iovec iov[HEADER_IOV_LEN];
     fill_header(iov);
     lseek(db->fd, 0, SEEK_SET);
-    readv(db->fd, iov, 9);
+    readv(db->fd, iov, HEADER_IOV_LEN);
 }
 
 // ############################# node #############################

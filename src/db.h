@@ -21,6 +21,7 @@ struct header_t {
     size_t key_nums = 0;
     off_t root_off = 0;
     off_t leaf_off = 0;
+    off_t last_off = 0;
     off_t free_list_head = page_size;
     size_t free_pages = 0;
     off_t over_page_list_head = 0;
@@ -159,7 +160,8 @@ public:
     void set_page_size(int page_size);
     void set_page_cache_slots(int slots);
 
-    iterator first() { return header.key_nums > 0 ? iterator(this, header.leaf_off, 0) : iterator(this); }
+    iterator first();
+    iterator last();
     iterator find(const key_t& key) { return find(root.get(), key); }
     void insert(const key_t& key, const value_t& value);
     void erase(const key_t& key);
@@ -175,8 +177,11 @@ private:
     void erase(node *x, const key_t& key, node *precursor);
 
     bool isfull(node *x, const key_t& key, const value_t& value);
-    void split(node *x, int i);
-    node *split(node *x);
+    void split(node *x, int i, const key_t& key);
+    node *split(node *x, int type);
+    enum { RIGHT_INSERT_SPLIT, LEFT_INSERT_SPLIT, MID_SPLIT };
+    int get_split_type(node *x, const key_t& key);
+    void link_leaf(node *z, node *y, int type);
 
     node *get_precursor(node *x);
     void borrow_from_right(node *r, node *x, node *z, int i);
