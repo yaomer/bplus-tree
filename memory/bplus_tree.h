@@ -16,13 +16,6 @@ public:
     struct node;
     typedef std::pair<node*, int> pos_type;
 
-    struct info {
-        void clear() { first = last = nullptr; size = 0; }
-        node *first = nullptr;
-        node *last = nullptr;
-        size_t size = 0;
-    };
-
     struct node {
         node(int M, bool isleaf) : isleaf(isleaf)
         {
@@ -37,7 +30,7 @@ public:
             if (isleaf) return { this, i };
             return childs[i]->find(key);
         }
-        void insert(const key_type& key, const value_type& value, info& info)
+        void insert(bplus_tree<Key, T, Comparator>& b, const key_type& key, const value_type& value)
         {
             int i = search(key);
             if (isleaf) {
@@ -50,13 +43,13 @@ public:
                     }
                     keys[i] = key;
                     values[i] = new value_type(value);
-                    if (!info.first || less(key, info.first->keys[0])) {
-                        info.first = this;
+                    if (!b.first_node || less(key, b.first_node->keys[0])) {
+                        b.first_node = this;
                     }
-                    if (!info.last || less(info.last->keys[info.last->n - 1], key)) {
-                        info.last = this;
+                    if (!b.last_node || less(b.last_node->keys[b.last_node->n - 1], key)) {
+                        b.last_node = this;
                     }
-                    info.size++;
+                    b.keynums++;
                     n++;
                 }
             } else {
@@ -67,10 +60,10 @@ public:
                 // 分裂沿途的满节点
                 if (childs[i]->isfull()) {
                     split(i);
-                    if (info.last == childs[i]) info.last = childs[i + 1];
+                    if (b.last_node == childs[i]) b.last_node = childs[i + 1];
                     if (less(keys[i], key)) i++;
                 }
-                childs[i]->insert(key, value, info);
+                childs[i]->insert(b, key, value);
             }
         }
         void split(int i)
@@ -113,14 +106,14 @@ public:
         // 为了防止合并叶子节点后导致父节点中的关键字数目少于ceil(M / 2)
         // 我们在沿树下降过程中提前合并以保证降临的节点的关键字数目至少为ceil(M / 2) + 1
         // 这样就不需要再进行回溯了
-        void erase(const key_type& key, node *precursor, info& info)
+        void erase(bplus_tree<Key, T, Comparator>& b, const key_type& key, node *precursor)
         {
             int i = search(key);
             if (i == n) return;
             if (isleaf) {
                 if (isequal(i, key)) {
                     remove_key(i, true);
-                    info.size--;
+                    b.keynums--;
                 }
                 return;
             }
@@ -138,31 +131,31 @@ public:
                 node *z = i + 1 < n ? childs[i + 1] : nullptr;
                 if (y && y->n > t) {
                     borrow_from_left(x, y, i - 1);
-                    x->erase(key, precursor, info);
+                    x->erase(b, key, precursor);
                 } else if (z && z->n > t) {
                     borrow_from_right(x, z, i);
-                    x->erase(key, precursor, info);
+                    x->erase(b, key, precursor);
                 } else {
                     if (y) {
                         node *c = childs[i - 1];
                         remove_key(i - 1, false);
                         childs[i - 1] = c;
-                        if (info.first == x) info.first = y;
-                        if (info.last == x) info.last = y;
+                        if (b.first_node == x) b.first_node = y;
+                        if (b.last_node == x) b.last_node = y;
                         y->merge(x);
-                        y->erase(key, precursor, info);
+                        y->erase(b, key, precursor);
                     } else if (z) {
                         node *c = childs[i];
                         remove_key(i, false);
                         childs[i] = c;
-                        if (info.first == z) info.first = x;
-                        if (info.last == z) info.last = x;
+                        if (b.first_node == z) b.first_node = x;
+                        if (b.last_node == z) b.last_node = x;
                         x->merge(z);
-                        x->erase(key, precursor, info);
+                        x->erase(b, key, precursor);
                     }
                 }
             } else {
-                x->erase(key, precursor, info);
+                x->erase(b, key, precursor);
             }
         }
         node *get_precursor()
@@ -297,9 +290,9 @@ public:
     {
     }
     ~bplus_tree() { clear(); delete root; }
-    iterator first() { return iterator(info.first, 0); }
-    iterator last() { return iterator(info.last, info.last ? info.last->n - 1 : 0); }
-    size_t size() { return info.size; }
+    iterator first() { return iterator(first_node, 0); }
+    iterator last() { return iterator(last_node, last_node ? last_node->n - 1 : 0); }
+    size_t size() { return keynums; }
     iterator find(const key_type& key)
     {
         auto [x, i] = root->find(key);
@@ -314,11 +307,11 @@ public:
             root->childs[0] = r;
             root->split(0);
         }
-        root->insert(key, value, info);
+        root->insert(*this, key, value);
     }
     void erase(const key_type& key)
     {
-        root->erase(key, nullptr, info);
+        root->erase(*this, key, nullptr);
         if (!root->isleaf && root->n == 1) {
             node *r = root->childs[0];
             delete root;
@@ -327,11 +320,11 @@ public:
     }
     void clear()
     {
-        while (info.size > 0) {
+        while (keynums > 0) {
             auto key = *first().key();
             erase(key);
         }
-        info.clear();
+        first_node = last_node = nullptr;
     }
 private:
     bplus_tree(const bplus_tree&) = delete;
@@ -346,7 +339,9 @@ private:
     // 并且所有关键字必须都出现在叶子节点中
     const int M = 4; // M >= 3
     node *root = nullptr;
-    info info;
+    node *first_node = nullptr;
+    node *last_node = nullptr;
+    size_t keynums = 0;
     Comparator comparator;
 };
 
