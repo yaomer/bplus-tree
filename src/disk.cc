@@ -18,7 +18,6 @@ void translation_table::clear()
     translation_to_off.clear();
     cache_list.clear();
     change_list.clear();
-    over_page_off.clear();
 }
 
 node *translation_table::lru_get(off_t off)
@@ -44,12 +43,6 @@ void translation_table::lru_put(off_t off, node *node)
         auto *evict_node = translation_to_node[evict_off].x.get();
         if (evict_node->dirty) {
             save_node(evict_off, evict_node);
-        }
-        // node被淘汰时，相应的value就应该从over_page_off中移除，不然就会导致野指针
-        for (auto value : evict_node->values) {
-            if (over_page_off.count(value)) {
-                over_page_off.erase(value);
-            }
         }
         translation_to_off.erase(evict_node);
         translation_to_node.erase(evict_off);
@@ -181,7 +174,7 @@ void node::update(bool dirty)
     for (auto& key : keys) page_used += limit.key_len_field + key.size();
     if (leaf) {
         for (auto& value : values)  {
-            page_used += limit.value_len_field + std::min(limit.over_value, value->size());
+            page_used += limit.value_len_field + std::min(limit.over_value, (size_t)value->reallen);
         }
         page_used += sizeof(off_t) * 2;
     } else {
@@ -223,10 +216,10 @@ void translation_table::save_node(off_t off, node *node)
 
 void translation_table::save_value(std::string& buf, value_t *value)
 {
-    uint32_t len = value->size();
+    uint32_t len = value->reallen;
     encode32(buf, len);
     if (len <= limit.over_value) {
-        buf.append(*value);
+        buf.append(*value->val);
         return;
     }
     // over-value:
@@ -236,15 +229,14 @@ void translation_table::save_value(std::string& buf, value_t *value)
     // -----------------------------------------------------------------
     // over-page: [next-over-page-off][data]
     size_t pos = OVER_VALUE_LEN;
-    auto it = over_page_off.find(value);
     // 我们只需将存储到叶节点本身的部分数据写入磁盘即可
-    if (it != over_page_off.end()) {
-        auto [page_off, remain_off] = it->second;
-        encodeoff(buf, page_off);
-        encode16(buf, remain_off);
-        buf.append(value->data(), pos);
+    if (value->over_page_off > 0) {
+        encodeoff(buf, value->over_page_off);
+        encode16(buf, value->remain_off);
+        buf.append(value->val->data(), pos);
         return;
     }
+    // ##初次插入新value的情况
     // 对于剩下的存储到溢出页的数据，我们将根据页大小进行分块
     len -= pos;
     size_t n = len / CAP_OF_OVER_PAGE;
@@ -259,13 +251,14 @@ void translation_table::save_value(std::string& buf, value_t *value)
     over_page_off_t over_page;
     if (r > 0) {
         size_t roff = pos + n * CAP_OF_OVER_PAGE;
-        over_page = db->page_manager.write_over_page(value->data() + roff, r);
+        over_page = db->page_manager.write_over_page(value->val->data() + roff, r);
+        value->remain_off = over_page.second;
     }
 
     n = pages.size();
-    off_t page_off = n > 0 ? db->page_manager.alloc_page() : over_page.first;
+    value->over_page_off = n > 0 ? db->page_manager.alloc_page() : over_page.first;
 
-    off_t off = page_off;
+    off_t off = value->over_page_off;
     for (int i = 0; i < n; i++) {
         struct iovec iov[2];
         off_t next_off;
@@ -276,17 +269,19 @@ void translation_table::save_value(std::string& buf, value_t *value)
         }
         iov[0].iov_base = &next_off;
         iov[0].iov_len = sizeof(next_off);
-        iov[1].iov_base = value->data() + pos;
+        iov[1].iov_base = value->val->data() + pos;
         iov[1].iov_len = pages[i];
         pos += pages[i];
         lseek(db->fd, off, SEEK_SET);
         writev(db->fd, iov, 2);
         off = next_off;
     }
-    encodeoff(buf, page_off);
-    encode16(buf, over_page.second);
-    buf.append(value->data(), OVER_VALUE_LEN);
-    over_page_off[value] = { page_off, over_page.second };
+    encodeoff(buf, value->over_page_off);
+    encode16(buf, value->remain_off);
+    // 这里的value->val只是指向用户传入进来的value的指针，并不持有它
+    // 插入后我们只需保留存储在叶节点本身的前面部分值即可
+    value->val = new std::string(value->val->data(), OVER_VALUE_LEN);
+    buf.append(*value->val);
 }
 
 node *translation_table::load_node(off_t off)
@@ -325,21 +320,29 @@ node *translation_table::load_node(off_t off)
 
 value_t *translation_table::load_value(char **ptr)
 {
-    uint32_t len = decode32(ptr);
-    if (len <= limit.over_value) {
-        value_t *value = new value_t(*ptr, len);
-        *ptr += len;
+    value_t *value = new value_t();
+    value->reallen = decode32(ptr);
+    if (value->reallen <= limit.over_value) {
+        value->val = new std::string(*ptr, value->reallen);
+        *ptr += value->reallen;
         return value;
     }
-    value_t *value = new value_t();
-    off_t off = decodeoff(ptr);
-    uint16_t remain_off = decode16(ptr);
-    over_page_off[value] = { off, remain_off };
-    size_t n = OVER_VALUE_LEN;
-    value->append(*ptr, n);
-    *ptr += n;
-    len -= n;
+    // 就算value的长度超过了limit.over_value，我们也只加载存储在叶节点
+    // 本身的数据，这并不影响修改操作，当真正需要完整的值时，可以通过
+    // 调用load_real_value()来获得
+    value->over_page_off = decodeoff(ptr);
+    value->remain_off = decode16(ptr);
+    value->val = new std::string(*ptr, OVER_VALUE_LEN);
+    *ptr += OVER_VALUE_LEN;
+    return value;
+}
 
+// 查找溢出页，取出完整的value
+void translation_table::load_real_value(value_t *value)
+{
+    off_t off = value->over_page_off;
+    uint32_t len = value->reallen - OVER_VALUE_LEN;
+    if (off == 0) return;
     while (true) {
         void *start = mmap(nullptr, db->header.page_size, PROT_READ, MAP_SHARED, db->fd, off);
         if (start == MAP_FAILED) {
@@ -348,29 +351,27 @@ value_t *translation_table::load_value(char **ptr)
         char *buf = reinterpret_cast<char*>(start);
         off = decodeoff(&buf);
         if (len >= CAP_OF_OVER_PAGE) {
-            value->append(buf, CAP_OF_OVER_PAGE);
+            value->val->append(buf, CAP_OF_OVER_PAGE);
             len -= CAP_OF_OVER_PAGE;
         } else {
             if (len <= CAP_OF_SHARED_OVER_PAGE) {
-                value->append(buf - sizeof(off) + remain_off, len);
+                value->val->append(buf - sizeof(off) + value->remain_off, len);
             } else {
-                value->append(buf, len);
+                value->val->append(buf, len);
             }
             off = 0;
         }
         munmap(start, db->header.page_size);
         if (off == 0) break;
     }
-    return value;
 }
 
 void translation_table::free_value(value_t *value)
 {
-    size_t len = value->size();
+    uint32_t len = value->reallen;
     if (len > limit.over_value) {
-        auto [off, remain_off] = over_page_off[value];
+        off_t off = value->over_page_off;
         len -= OVER_VALUE_LEN;
-        over_page_off.erase(value);
         while (true) {
             off_t next_off;
             lseek(db->fd, off, SEEK_SET);
@@ -382,7 +383,7 @@ void translation_table::free_value(value_t *value)
                 off = next_off;
             } else {
                 if (len <= CAP_OF_SHARED_OVER_PAGE)
-                    db->page_manager.free_over_page(off, remain_off, len);
+                    db->page_manager.free_over_page(off, value->remain_off, len);
                 else
                     db->page_manager.free_page(off);
                 break;

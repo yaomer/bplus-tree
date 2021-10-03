@@ -78,6 +78,11 @@ DB::iterator DB::last()
     return header.key_nums > 0 ? iterator(this, header.last_off, to_node(header.last_off)->keys.size()-1) : iterator(this);
 }
 
+DB::iterator DB::find(const std::string& key)
+{
+    return find(root.get(), key);
+}
+
 DB::iterator DB::find(node *x, const key_t& key)
 {
     int i = search(x, key);
@@ -89,11 +94,18 @@ DB::iterator DB::find(node *x, const key_t& key)
     return find(to_node(x->childs[i]), key);
 }
 
-void DB::insert(const key_t& key, const value_t& value)
+void DB::insert(const std::string& key, const std::string& value)
 {
-    node *r = root.get();
     if (!check_limit(key, value)) return;
-    if (isfull(r, key, value)) {
+    value_t *v = new value_t();
+    v->reallen = value.size();
+    if (value.size() <= limit.over_value) {
+        v->val = new std::string(value);
+    } else {
+        v->val = const_cast<std::string*>(&value);
+    }
+    node *r = root.get();
+    if (isfull(r, key, v)) {
         root.release();
         root.reset(new node(false));
         root->resize(1);
@@ -102,20 +114,19 @@ void DB::insert(const key_t& key, const value_t& value)
         header.root_off = page_manager.alloc_page();
         split(root.get(), 0, key);
     }
-    insert(root.get(), key, value);
+    insert(root.get(), key, v);
     translation_table.flush();
 }
 
-void DB::insert(node *x, const key_t& key, const value_t& value)
+void DB::insert(node *x, const key_t& key, value_t *value)
 {
     int i = search(x, key);
     int n = x->keys.size();
     translation_table.put_change_node(x);
     if (x->leaf) {
         if (i < n && equal(x->keys[i], key)) {
-            if (x->values[i]->compare(value) == 0) return;
             translation_table.free_value(x->values[i]);
-            x->values[i] = new value_t(value);
+            x->values[i] = value;
         } else {
             x->resize(++n);
             for (int j = n - 2; j >= i; j--) {
@@ -124,7 +135,7 @@ void DB::insert(node *x, const key_t& key, const value_t& value)
             if (less(key, to_node(header.leaf_off)->keys[0])) header.leaf_off = to_off(x);
             if (less(to_node(header.last_off)->keys.back(), key)) header.last_off = to_off(x);
             x->keys[i] = key;
-            x->values[i] = new value_t(value);
+            x->values[i] = value;
             header.key_nums++;
         }
         x->update();
@@ -383,18 +394,18 @@ int DB::search(node *x, const key_t& key)
     return std::distance(x->keys.begin(), p);
 }
 
-bool DB::isfull(node *x, const key_t& key, const value_t& value)
+bool DB::isfull(node *x, const key_t& key, value_t *value)
 {
     size_t page_used = x->page_used;
     if (x->leaf) {
-        page_used += (limit.key_len_field + key.size()) + (limit.value_len_field + std::min(limit.over_value, value.size()));
+        page_used += (limit.key_len_field + key.size()) + (limit.value_len_field + std::min(limit.over_value, (size_t)value->reallen));
     } else {
         page_used += (limit.key_len_field + limit.max_key) + sizeof(off_t);
     }
     return page_used > header.page_size;
 }
 
-bool DB::check_limit(const key_t& key, const value_t& value)
+bool DB::check_limit(const std::string& key, const std::string& value)
 {
     if (key.size() == 0 || key.size() > limit.max_key) {
         printf("The range for key is (0, %zu]\n", limit.max_key);
@@ -413,7 +424,7 @@ void DB::rebuild()
     mktemp(tmpfile);
     DB *tmpdb = new DB(tmpfile);
     for (auto it = first(); it.valid(); it.next()) {
-        tmpdb->insert(*it.key(), *it.value());
+        tmpdb->insert(it.key(), it.value());
     }
     delete tmpdb;
     rename(tmpfile, filename.c_str());

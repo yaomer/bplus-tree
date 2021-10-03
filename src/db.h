@@ -124,8 +124,13 @@ public:
         iterator(DB *db) : db(db), off(0), i(0) {  }
         iterator(DB *db, off_t off, int i) : db(db), off(off), i(i) {  }
         bool valid() { return off > 0; }
-        key_t *key() { return &db->to_node(off)->keys[i]; }
-        value_t *value() { return db->to_node(off)->values[i]; }
+        const std::string& key() { return db->to_node(off)->keys[i]; }
+        const std::string& value()
+        {
+            value_t *v = db->to_node(off)->values[i];
+            db->translation_table.load_real_value(v);
+            return *v->val;
+        }
         iterator& next()
         {
             if (off > 0) {
@@ -162,9 +167,9 @@ public:
 
     iterator first();
     iterator last();
-    iterator find(const key_t& key) { return find(root.get(), key); }
-    void insert(const key_t& key, const value_t& value);
-    void erase(const key_t& key);
+    iterator find(const std::string& key);
+    void insert(const std::string& key, const std::string& value);
+    void erase(const std::string& key);
     void rebuild();
 private:
     void init();
@@ -173,10 +178,10 @@ private:
     off_t to_off(node *node) { return translation_table.to_off(node); }
 
     iterator find(node *x, const key_t& key);
-    void insert(node *x, const key_t& key, const value_t& value);
+    void insert(node *x, const key_t& key, value_t *value);
     void erase(node *x, const key_t& key, node *precursor);
 
-    bool isfull(node *x, const key_t& key, const value_t& value);
+    bool isfull(node *x, const key_t& key, value_t *value);
     void split(node *x, int i, const key_t& key);
     node *split(node *x, int type);
     enum { RIGHT_INSERT_SPLIT, LEFT_INSERT_SPLIT, MID_SPLIT };
@@ -190,7 +195,7 @@ private:
 
     int search(node *x, const key_t& key);
 
-    bool check_limit(const key_t& key, const value_t& value);
+    bool check_limit(const std::string& key, const std::string& value);
 
     bool less(const key_t& l, const key_t& r)
     {

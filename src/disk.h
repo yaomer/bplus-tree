@@ -5,6 +5,7 @@
 #include <unordered_set>
 #include <vector>
 #include <list>
+#include <string>
 
 #include <sys/uio.h>
 
@@ -16,7 +17,14 @@ class DB;
 struct node;
 
 typedef std::string key_t;
-typedef std::string value_t;
+
+struct value_t {
+    ~value_t() { delete val; }
+    off_t over_page_off = 0;
+    uint16_t remain_off = 0;
+    uint32_t reallen;
+    std::string *val;
+};
 
 // 转换表中并不保存根节点
 class translation_table {
@@ -29,6 +37,7 @@ public:
     void init();
     void set_cache_cap(int cap) { lru_cap = std::max(128, cap); }
     node *load_node(off_t off);
+    void load_real_value(value_t *value);
     void free_node(node *node);
     void free_value(value_t *value);
     void release_root(node *root);
@@ -69,9 +78,6 @@ private:
     // 为了避免每次遍历cache_list
     std::unordered_set<node*> change_list;
     int lru_cap;
-    // 记录载入内存中的哪些value有溢出页
-    // 如果不是新插入的value，那么对于溢出页中的数据是不需要重写入磁盘的
-    std::unordered_map<value_t*, over_page_off_t> over_page_off;
 };
 }
 
