@@ -122,52 +122,27 @@ public:
     class iterator {
     public:
         iterator(DB *db) : db(db), off(0), i(0) {  }
-        iterator(DB *db, off_t off, int i) : db(db), off(off), i(i) {  }
-        bool valid() { return off > 0; }
-        const std::string& key() { return db->to_node(off)->keys[i]; }
-        const std::string& value()
-        {
-            value_t *v = db->to_node(off)->values[i];
-            db->translation_table.load_real_value(v);
-            return *v->val;
-        }
-        iterator& next()
-        {
-            if (off > 0) {
-                node *x = db->to_node(off);
-                if (i + 1 < x->keys.size()) i++;
-                else {
-                    off = x->right;
-                    i = 0;
-                }
-            }
-            return *this;
-        }
-        iterator& prev()
-        {
-            if (off > 0) {
-                node *x = db->to_node(off);
-                if (i - 1 >= 0) i--;
-                else {
-                    off = x->left;
-                    if (off > 0) i = db->to_node(off)->keys.size() - 1;
-                }
-            }
-            return *this;
-        }
+        bool valid();
+        const std::string& key();
+        const std::string& value();
+        iterator& seek(const std::string& key);
+        iterator& seek_to_first();
+        iterator& seek_to_last();
+        iterator& next();
+        iterator& prev();
     private:
         DB *db;
         off_t off;
         int i;
+        std::string saved_value;
     };
 
     void set_key_comparator(Comparator comp);
     void set_page_size(int page_size);
     void set_page_cache_slots(int slots);
 
-    iterator first();
-    iterator last();
-    iterator find(const std::string& key);
+    iterator new_iterator() { return iterator(this); }
+    bool find(const std::string& key, std::string *value);
     void insert(const std::string& key, const std::string& value);
     void erase(const std::string& key);
     void rebuild();
@@ -177,7 +152,11 @@ private:
     node *to_node(off_t off) { return translation_table.to_node(off); }
     off_t to_off(node *node) { return translation_table.to_off(node); }
 
-    iterator find(node *x, const key_t& key);
+    int search(node *x, const key_t& key);
+    bool check_limit(const std::string& key, const std::string& value);
+    value_t *build_new_value(const std::string& value);
+
+    std::pair<node*, int> find(node *x, const key_t& key);
     void insert(node *x, const key_t& key, value_t *value);
     void erase(node *x, const key_t& key, node *precursor);
 
@@ -192,10 +171,6 @@ private:
     void borrow_from_right(node *r, node *x, node *z, int i);
     void borrow_from_left(node *r, node *x, node *y, int i);
     void merge(node *y, node *x);
-
-    int search(node *x, const key_t& key);
-
-    bool check_limit(const std::string& key, const std::string& value);
 
     bool less(const key_t& l, const key_t& r)
     {

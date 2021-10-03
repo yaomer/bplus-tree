@@ -37,7 +37,7 @@ public:
     void init();
     void set_cache_cap(int cap) { lru_cap = std::max(128, cap); }
     node *load_node(off_t off);
-    void load_real_value(value_t *value);
+    void load_real_value(value_t *value, std::string *saved_val);
     void free_node(node *node);
     void free_value(value_t *value);
     void release_root(node *root);

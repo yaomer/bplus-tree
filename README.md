@@ -7,8 +7,9 @@ Usage
 
 void traveldb(bplus_tree_db::DB& db)
 {
-    for (auto it = db.first(); it.valid(); it.next()) {
-        std::cout << "(" << it.key()->c_str() << ", " << it.value()->c_str() << ")\n";
+    auto it = db.new_iterator();
+    for (it.seek_to_first(); it.valid(); it.next()) {
+        std::cout << "(" << it.key().c_str() << ", " << it.value().c_str() << ")\n";
     }
 }
 
@@ -23,8 +24,10 @@ int main(int argc, char *argv[])
     traveldb(db);
     // for update
     db.insert("key1", "hello1");
-    auto it = db.find("key1");
-    if (it.valid()) std::cout << it.value()->c_str() << "\n";
+    // for search
+    std::string value;
+    auto s = db.find("key1", &value);
+    if (s) std::cout << value.c_str() << "\n";
     else std::cout << "not found\n";
     // for erase
     db.erase("key2");

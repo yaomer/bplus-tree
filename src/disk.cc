@@ -338,11 +338,17 @@ value_t *translation_table::load_value(char **ptr)
 }
 
 // 查找溢出页，取出完整的value
-void translation_table::load_real_value(value_t *value)
+void translation_table::load_real_value(value_t *value, std::string *saved_val)
 {
     off_t off = value->over_page_off;
+    if (off == 0) {
+        assert(value->reallen <= limit.over_value);
+        saved_val->assign(*value->val);
+        return;
+    }
     uint32_t len = value->reallen - OVER_VALUE_LEN;
-    if (off == 0) return;
+    assert(value->val->size() == OVER_VALUE_LEN);
+    saved_val->assign(*value->val);
     while (true) {
         void *start = mmap(nullptr, db->header.page_size, PROT_READ, MAP_SHARED, db->fd, off);
         if (start == MAP_FAILED) {
@@ -351,13 +357,13 @@ void translation_table::load_real_value(value_t *value)
         char *buf = reinterpret_cast<char*>(start);
         off = decodeoff(&buf);
         if (len >= CAP_OF_OVER_PAGE) {
-            value->val->append(buf, CAP_OF_OVER_PAGE);
+            saved_val->append(buf, CAP_OF_OVER_PAGE);
             len -= CAP_OF_OVER_PAGE;
         } else {
             if (len <= CAP_OF_SHARED_OVER_PAGE) {
-                value->val->append(buf - sizeof(off) + value->remain_off, len);
+                saved_val->append(buf - sizeof(off) + value->remain_off, len);
             } else {
-                value->val->append(buf, len);
+                saved_val->append(buf, len);
             }
             off = 0;
         }

@@ -8,6 +8,7 @@ set (SRC "${PROJECT_SOURCE_DIR}/src")
 
 set (DB
     ${SRC}/db.cc
+    ${SRC}/db_iter.cc
     ${SRC}/disk.cc
     ${SRC}/page.cc
 )

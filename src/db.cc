@@ -67,36 +67,29 @@ void DB::set_page_cache_slots(int slots)
     translation_table.set_cache_cap(slots);
 }
 
-
-DB::iterator DB::first()
+bool DB::find(const std::string& key, std::string *value)
 {
-    return header.key_nums > 0 ? iterator(this, header.leaf_off, 0) : iterator(this);
+    auto [x, i] = find(root.get(), key);
+    if (x) {
+        translation_table.load_real_value(x->values[i], value);
+        return true;
+    }
+    return false;
 }
 
-DB::iterator DB::last()
-{
-    return header.key_nums > 0 ? iterator(this, header.last_off, to_node(header.last_off)->keys.size()-1) : iterator(this);
-}
-
-DB::iterator DB::find(const std::string& key)
-{
-    return find(root.get(), key);
-}
-
-DB::iterator DB::find(node *x, const key_t& key)
+std::pair<node*, int> DB::find(node *x, const key_t& key)
 {
     int i = search(x, key);
-    if (i == x->keys.size()) return iterator(this);
+    if (i == x->keys.size()) return { nullptr, 0 };
     if (x->leaf) {
-        if (equal(x->keys[i], key)) return iterator(this, to_off(x), i);
-        else return iterator(this);
+        if (equal(x->keys[i], key)) return { x, i };
+        else return { nullptr, 0 };
     }
     return find(to_node(x->childs[i]), key);
 }
 
-void DB::insert(const std::string& key, const std::string& value)
+value_t *DB::build_new_value(const std::string& value)
 {
-    if (!check_limit(key, value)) return;
     value_t *v = new value_t();
     v->reallen = value.size();
     if (value.size() <= limit.over_value) {
@@ -104,6 +97,13 @@ void DB::insert(const std::string& key, const std::string& value)
     } else {
         v->val = const_cast<std::string*>(&value);
     }
+    return v;
+}
+
+void DB::insert(const std::string& key, const std::string& value)
+{
+    if (!check_limit(key, value)) return;
+    value_t *v = build_new_value(value);
     node *r = root.get();
     if (isfull(r, key, v)) {
         root.release();
@@ -423,7 +423,8 @@ void DB::rebuild()
     char tmpfile[] = "tmp.XXXXXX";
     mktemp(tmpfile);
     DB *tmpdb = new DB(tmpfile);
-    for (auto it = first(); it.valid(); it.next()) {
+    auto it = new_iterator();
+    for (it.seek_to_first(); it.valid(); it.next()) {
         tmpdb->insert(it.key(), it.value());
     }
     delete tmpdb;
