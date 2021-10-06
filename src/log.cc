@@ -5,7 +5,7 @@
 #include "db.h"
 #include "codec.h"
 
-using namespace bplus_tree_db;
+using namespace bpdb;
 
 void redo_log::init()
 {

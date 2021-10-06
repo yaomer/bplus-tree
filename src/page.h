@@ -5,7 +5,7 @@
 #include <vector>
 #include <unordered_map>
 
-namespace bplus_tree_db {
+namespace bpdb {
 
 class DB;
 

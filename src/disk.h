@@ -11,7 +11,7 @@
 #include "page.h"
 #include "common.h"
 
-namespace bplus_tree_db {
+namespace bpdb {
 
 class DB;
 

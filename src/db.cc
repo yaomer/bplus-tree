@@ -5,9 +5,9 @@
 
 #include "db.h"
 
-using namespace bplus_tree_db;
+using namespace bpdb;
 
-namespace bplus_tree_db {
+namespace bpdb {
 
 struct limit_t limit;
 

@@ -5,7 +5,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 
-using namespace bplus_tree_db;
+using namespace bpdb;
 
 void page_manager::init()
 {

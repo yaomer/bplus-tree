@@ -3,7 +3,7 @@
 
 #include <string>
 
-namespace bplus_tree_db {
+namespace bpdb {
 
 inline void encode8(std::string& buf, uint8_t n)
 {

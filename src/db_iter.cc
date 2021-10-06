@@ -1,6 +1,6 @@
 #include "db.h"
 
-using namespace bplus_tree_db;
+using namespace bpdb;
 
 bool DB::iterator::valid()
 {

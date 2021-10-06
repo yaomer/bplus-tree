@@ -5,7 +5,7 @@ Usage
 
 #include <iostream>
 
-void traveldb(bplus_tree_db::DB& db)
+void traveldb(bpdb::DB& db)
 {
     auto it = db.new_iterator();
     for (it.seek_to_first(); it.valid(); it.next()) {
@@ -15,7 +15,7 @@ void traveldb(bplus_tree_db::DB& db)
 
 int main(int argc, char *argv[])
 {
-    bplus_tree_db::DB db;
+    bpdb::DB db;
     // for insert
     db.insert("key1", "value1");
     db.insert("key2", "value2");

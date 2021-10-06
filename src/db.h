@@ -13,7 +13,7 @@
 #include "page.h"
 #include "log.h"
 
-namespace bplus_tree_db {
+namespace bpdb {
 
 void panic(const char *fmt, ...);
 

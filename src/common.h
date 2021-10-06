@@ -6,7 +6,7 @@
 
 #include <limits.h>
 
-namespace bplus_tree_db {
+namespace bpdb {
 
 typedef std::string key_t;
 
