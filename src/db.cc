@@ -1,12 +1,15 @@
 #include <unordered_set>
 
+#include <sys/stat.h>
+#include <signal.h>
+
 #include "db.h"
 
 using namespace bplus_tree_db;
 
 namespace bplus_tree_db {
 
-struct limits limit;
+struct limit_t limit;
 
 void panic(const char *fmt, ...)
 {
@@ -21,14 +24,20 @@ void panic(const char *fmt, ...)
 }
 }
 
+static bool can_flush = false;
+
 void DB::init()
 {
     comparator = [](const key_t& l, const key_t& r) {
         return std::less<key_t>()(l, r);
     };
-    fd = open(filename.c_str(), O_RDWR | O_CREAT, 0644);
+    if (dbname.empty()) panic("dbname is empty");
+    if (dbname.back() != '/') dbname.push_back('/');
+    mkdir(dbname.c_str(), 0777);
+    dbfile = dbname + "dump.db";
+    fd = open(dbfile.c_str(), O_RDWR | O_CREAT, 0644);
     if (fd < 0) {
-        panic("open(%s) error: %s", filename.c_str(), strerror(errno));
+        panic("open(%s): %s", dbfile.c_str(), strerror(errno));
     }
     limit.over_value = header.page_size / 16;
     translation_table.init();
@@ -39,6 +48,17 @@ void DB::init()
         root.reset(new node(true));
     } else {
         root.reset(translation_table.load_node(header.root_off));
+    }
+    signal(SIGALRM, [](int signo){ can_flush = true; alarm(CHECK_POINT_INTERVAL); });
+    alarm(CHECK_POINT_INTERVAL);
+    redo_log.init();
+}
+
+void DB::flush_if_needed()
+{
+    if (can_flush) {
+        redo_log.check_point(FUZZY_CHECK_POINT);
+        can_flush = false;
     }
 }
 
@@ -103,6 +123,7 @@ value_t *DB::build_new_value(const std::string& value)
 void DB::insert(const std::string& key, const std::string& value)
 {
     if (!check_limit(key, value)) return;
+    redo_log.append(LOG_TYPE_INSERT, &key, &value);
     value_t *v = build_new_value(value);
     node *r = root.get();
     if (isfull(r, key, v)) {
@@ -115,14 +136,15 @@ void DB::insert(const std::string& key, const std::string& value)
         split(root.get(), 0, key);
     }
     insert(root.get(), key, v);
-    translation_table.flush();
+    redo_log.put_complete();
+    flush_if_needed();
 }
 
 void DB::insert(node *x, const key_t& key, value_t *value)
 {
     int i = search(x, key);
     int n = x->keys.size();
-    translation_table.put_change_node(x);
+    redo_log.put_change_node(x);
     if (x->leaf) {
         if (i < n && equal(x->keys[i], key)) {
             translation_table.free_value(x->values[i]);
@@ -177,9 +199,9 @@ void DB::split(node *x, int i, const key_t& key)
     if (z->leaf)
         link_leaf(z, y, type);
     x->update();
-    translation_table.put_change_node(x);
-    translation_table.put_change_node(y);
-    translation_table.put_change_node(z);
+    redo_log.put_change_node(x);
+    redo_log.put_change_node(y);
+    redo_log.put_change_node(z);
 }
 
 node *DB::split(node *x, int type)
@@ -234,7 +256,7 @@ void DB::link_leaf(node *z, node *y, int type)
         z->left = y->left;
         if (y->left > 0) {
             node *r = to_node(y->left);
-            translation_table.put_change_node(r);
+            redo_log.put_change_node(r);
             r->right = to_off(z);
             r->dirty = true;
         }
@@ -244,7 +266,7 @@ void DB::link_leaf(node *z, node *y, int type)
         z->right = y->right;
         if (y->right > 0) {
             node *r = to_node(y->right);
-            translation_table.put_change_node(r);
+            redo_log.put_change_node(r);
             r->left = to_off(z);
             r->dirty = true;
         }
@@ -256,16 +278,19 @@ void DB::link_leaf(node *z, node *y, int type)
 
 void DB::erase(const key_t& key)
 {
+    redo_log.append(LOG_TYPE_ERASE, &key);
     erase(root.get(), key, nullptr);
     if (!root->leaf && root->keys.size() == 1) {
         off_t off = root->childs[0];
         node *r = to_node(off);
+        redo_log.remove_node(root.get());
         translation_table.release_root(r);
         root.reset(r);
         page_manager.free_page(header.root_off);
         header.root_off = off;
     }
-    translation_table.flush();
+    redo_log.put_complete();
+    flush_if_needed();
 }
 
 void DB::erase(node *r, const key_t& key, node *precursor)
@@ -273,7 +298,7 @@ void DB::erase(node *r, const key_t& key, node *precursor)
     int i = search(r, key);
     int n = r->keys.size();
     if (i == n) return;
-    translation_table.put_change_node(r);
+    redo_log.put_change_node(r);
     if (r->leaf) {
         if (i < n && equal(r->keys[i], key)) {
             translation_table.free_value(r->values[i]);
@@ -283,7 +308,7 @@ void DB::erase(node *r, const key_t& key, node *precursor)
         return;
     }
     node *x = to_node(r->childs[i]);
-    translation_table.put_change_node(x);
+    redo_log.put_change_node(x);
     if (!precursor && (i < n && equal(r->keys[i], key))) {
         precursor = get_precursor(x);
     }
@@ -298,8 +323,8 @@ void DB::erase(node *r, const key_t& key, node *precursor)
     }
     node *y = i - 1 >= 0 ? to_node(r->childs[i - 1]) : nullptr;
     node *z = i + 1 < r->keys.size() ? to_node(r->childs[i + 1]) : nullptr;
-    if (y) translation_table.put_change_node(y);
-    if (z) translation_table.put_change_node(z);
+    if (y) redo_log.put_change_node(y);
+    if (z) redo_log.put_change_node(z);
     if (y && y->page_used >= t) {
         borrow_from_left(r, x, y, i - 1);
         erase(x, key, precursor);
@@ -375,12 +400,13 @@ void DB::merge(node *y, node *x)
         y->right = x->right;
         if (x->right > 0) {
             node *r = to_node(x->right);
-            translation_table.put_change_node(r);
+            redo_log.put_change_node(r);
             r->left = to_off(y);
             r->dirty = true;
         }
     }
     x->resize(0);
+    redo_log.remove_node(x);
     translation_table.free_node(x);
     y->update();
 }
@@ -428,6 +454,6 @@ void DB::rebuild()
         tmpdb->insert(it.key(), it.value());
     }
     delete tmpdb;
-    rename(tmpfile, filename.c_str());
+    rename(tmpfile, dbfile.c_str());
     init();
 }

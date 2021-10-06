@@ -17,7 +17,6 @@ void translation_table::clear()
     translation_to_node.clear();
     translation_to_off.clear();
     cache_list.clear();
-    change_list.clear();
 }
 
 node *translation_table::lru_get(off_t off)
@@ -38,35 +37,19 @@ void translation_table::lru_put(off_t off, node *node)
     if (translation_to_node.count(off)) {
         panic("lru_put: off=%lld exists", off);
     }
-    if (cache_list.size() == lru_cap) {
-        off_t evict_off = cache_list.back();
-        auto *evict_node = translation_to_node[evict_off].x.get();
-        if (evict_node->dirty) {
-            save_node(evict_off, evict_node);
+    if (cache_list.size() >= lru_cap) {
+        for (int i = 0; i < FUZZY_CHECK_POINT_PAGES; i++) {
+            off_t evict_off = cache_list.back();
+            auto *evict_node = translation_to_node[evict_off].x.get();
+            if (evict_node->dirty) break;
+            translation_to_off.erase(evict_node);
+            translation_to_node.erase(evict_off);
+            cache_list.pop_back();
         }
-        translation_to_off.erase(evict_node);
-        translation_to_node.erase(evict_off);
-        cache_list.pop_back();
     }
     cache_list.push_front(off);
     translation_to_node.emplace(off, cache_node(node, cache_list.begin()));
     translation_to_off.emplace(node, off);
-}
-
-// 退出时flush所有的dirty node
-void translation_table::lru_flush()
-{
-    for (auto& [node, off] : translation_to_off) {
-        if (node->dirty) {
-            save_node(off, node);
-        }
-    }
-    translation_to_node.clear();
-    // 就算什么也没做，我们也强制flush一次根节点
-    // 以便重启后可以成功load根节点
-    save_node(db->header.root_off, db->root.get());
-    save_header();
-    fsync(db->fd);
 }
 
 node *translation_table::to_node(off_t off)
@@ -90,54 +73,39 @@ off_t translation_table::to_off(node *node)
     return it->second;
 }
 
-// 将每次修改操作涉及到的所有dirty node写回磁盘
-// 但节点本身在被淘汰前仍驻留在内存中
-void translation_table::flush()
-{
-    for (auto node : change_list) {
-        if (node->dirty) {
-            save_node(to_off(node), node);
-            node->dirty = false;
-        }
-    }
-    change_list.clear();
-    save_header();
-    fsync(db->fd);
-}
-
 // ########################### file-header ###########################
 // [magic][page-size][key-nums][root-off][leaf-off][last-off]
 // [free-list-head][free-pages][over-page-list-head][over-pages]
-void translation_table::fill_header(struct iovec *iov)
+void translation_table::fill_header(header_t *header, struct iovec *iov)
 {
-    iov[0].iov_base = &db->header.magic;
-    iov[0].iov_len = sizeof(db->header.magic);
-    iov[1].iov_base = &db->header.page_size;
-    iov[1].iov_len = sizeof(db->header.page_size);
-    iov[2].iov_base = &db->header.key_nums;
-    iov[2].iov_len = sizeof(db->header.key_nums);
-    iov[3].iov_base = &db->header.root_off;
-    iov[3].iov_len = sizeof(db->header.root_off);
-    iov[4].iov_base = &db->header.leaf_off;
-    iov[4].iov_len = sizeof(db->header.leaf_off);
-    iov[5].iov_base = &db->header.last_off;
-    iov[5].iov_len = sizeof(db->header.last_off);
-    iov[6].iov_base = &db->header.free_list_head;
-    iov[6].iov_len = sizeof(db->header.free_list_head);
-    iov[7].iov_base = &db->header.free_pages;
-    iov[7].iov_len = sizeof(db->header.free_pages);
-    iov[8].iov_base = &db->header.over_page_list_head;
-    iov[8].iov_len = sizeof(db->header.over_page_list_head);
-    iov[9].iov_base = &db->header.over_pages;
-    iov[9].iov_len = sizeof(db->header.over_pages);
+    iov[0].iov_base = &header->magic;
+    iov[0].iov_len = sizeof(header->magic);
+    iov[1].iov_base = &header->page_size;
+    iov[1].iov_len = sizeof(header->page_size);
+    iov[2].iov_base = &header->key_nums;
+    iov[2].iov_len = sizeof(header->key_nums);
+    iov[3].iov_base = &header->root_off;
+    iov[3].iov_len = sizeof(header->root_off);
+    iov[4].iov_base = &header->leaf_off;
+    iov[4].iov_len = sizeof(header->leaf_off);
+    iov[5].iov_base = &header->last_off;
+    iov[5].iov_len = sizeof(header->last_off);
+    iov[6].iov_base = &header->free_list_head;
+    iov[6].iov_len = sizeof(header->free_list_head);
+    iov[7].iov_base = &header->free_pages;
+    iov[7].iov_len = sizeof(header->free_pages);
+    iov[8].iov_base = &header->over_page_list_head;
+    iov[8].iov_len = sizeof(header->over_page_list_head);
+    iov[9].iov_base = &header->over_pages;
+    iov[9].iov_len = sizeof(header->over_pages);
 }
 
 #define HEADER_IOV_LEN 10
 
-void translation_table::save_header()
+void translation_table::save_header(header_t *header)
 {
     struct iovec iov[HEADER_IOV_LEN];
-    fill_header(iov);
+    fill_header(header, iov);
     lseek(db->fd, 0, SEEK_SET);
     writev(db->fd, iov, HEADER_IOV_LEN);
 }
@@ -150,10 +118,10 @@ void translation_table::load_header()
     if (st.st_size == 0) return;
     read(db->fd, &magic, sizeof(magic));
     if (magic != db->header.magic) {
-        panic("unknown data file <%s>", db->filename.c_str());
+        panic("unknown data file <%s>", db->dbfile.c_str());
     }
     struct iovec iov[HEADER_IOV_LEN];
-    fill_header(iov);
+    fill_header(&db->header, iov);
     lseek(db->fd, 0, SEEK_SET);
     readv(db->fd, iov, HEADER_IOV_LEN);
 }
@@ -402,7 +370,6 @@ void translation_table::free_value(value_t *value)
 void translation_table::free_node(node *node)
 {
     off_t off = to_off(node);
-    change_list.erase(node);
     cache_list.erase(translation_to_node[off].pos);
     translation_to_off.erase(node);
     translation_to_node.erase(off);
@@ -412,7 +379,6 @@ void translation_table::free_node(node *node)
 void translation_table::release_root(node *root)
 {
     off_t off = to_off(root);
-    change_list.erase(db->root.get());
     cache_list.erase(translation_to_node[off].pos);
     translation_to_node[off].x.release();
     translation_to_node.erase(off);

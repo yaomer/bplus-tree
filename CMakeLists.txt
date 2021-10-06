@@ -11,6 +11,7 @@ set (DB
     ${SRC}/db_iter.cc
     ${SRC}/disk.cc
     ${SRC}/page.cc
+    ${SRC}/log.cc
 )
 
 set (HEADERS
@@ -18,6 +19,8 @@ set (HEADERS
     ${SRC}/disk.h
     ${SRC}/page.h
     ${SRC}/codec.h
+    ${SRC}/common.h
+    ${SRC}/log.h
 )
 
 add_library (bpdb STATIC ${DB})
