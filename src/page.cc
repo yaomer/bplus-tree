@@ -42,6 +42,7 @@ void page_manager::clear()
 // 3) 一个value溢出的值不能占满整页，此时我们将管理所有这些未用完的页
 off_t page_manager::alloc_page()
 {
+    recursive_lock_t lk(db->header_mtx);
     off_t off = db->header.free_list_head;
     if (db->header.free_pages > 0) {
         db->header.free_pages--;
@@ -63,6 +64,7 @@ off_t page_manager::alloc_page()
 void page_manager::free_page(off_t off)
 {
     ASSERT_OFF(off);
+    recursive_lock_t lk(db->header_mtx);
     lseek(db->fd, off, SEEK_SET);
     write(db->fd, &db->header.free_list_head, sizeof(db->header.free_list_head));
     db->header.free_list_head = off;
@@ -93,6 +95,7 @@ over_page_off_t page_manager::write_over_page(const char *data, uint16_t n)
 {
     ASSERT_AVAIL(n);
     uint16_t round_n = round4(n); // n会被向上取整到4的倍数
+    lock_t lk(mtx);
     auto it = avail_map.lower_bound(round_n);
     if (it == avail_map.end()) { // 没有找到剩余可用大小至少为round_n的页
         return write_new_over_page(data, n);
@@ -113,21 +116,17 @@ over_page_off_t page_manager::write_over_page(const char *data, uint16_t n)
     return write_new_over_page(data, n);
 }
 
-void page_manager::growth_file(off_t off)
-{
-    struct stat st;
-    fstat(db->fd, &st);
-    if (off + db->header.page_size > st.st_size)
-        ftruncate(db->fd, off + db->header.page_size);
-}
-
 // 分配一个新页，并写入data[n]
 over_page_off_t page_manager::write_new_over_page(const char *data, uint16_t n)
 {
     off_t off = alloc_page();
+    db->lock_header();
     // 因为如果mmap()映射的区域超出了文件大小，那么我们读写超出的区域就是非法的
     // 所以如有必要，我们需要事先增长文件大小
-    growth_file(off);
+    struct stat st;
+    fstat(db->fd, &st);
+    if (off + db->header.page_size > st.st_size)
+        ftruncate(db->fd, off + db->header.page_size);
     uint16_t round_n = round4(n);
     db->header.over_pages++;
     lseek(db->fd, off, SEEK_SET);
@@ -136,6 +135,8 @@ over_page_off_t page_manager::write_new_over_page(const char *data, uint16_t n)
     over_page.next_off = db->header.over_page_list_head;
     over_page.avail = db->header.page_size - OVER_PAGE_AVAIL_OFF - round_n;
     over_page.free_block_head = OVER_PAGE_AVAIL_OFF + round_n;
+    db->header.over_page_list_head = off;
+    db->unlock_header();
     struct iovec iov[7];
     iov[0].iov_base = &over_page.next_off;
     iov[0].iov_len = sizeof(over_page.next_off);
@@ -155,7 +156,6 @@ over_page_off_t page_manager::write_new_over_page(const char *data, uint16_t n)
     iov[6].iov_len = sizeof(over_page.avail);
     writev(db->fd, iov, 7);
 
-    db->header.over_page_list_head = off;
     if (over_page.next_off > 0) {
         over_page_map[over_page.next_off].prev_off = off;
     }
@@ -173,7 +173,7 @@ uint16_t page_manager::search_and_try_write(off_t off, const char *data, uint16_
     // 我们这里使用PROT_WRITE以便直接修改溢出页
     void *start = mmap(nullptr, db->header.page_size, PROT_READ | PROT_WRITE, MAP_SHARED, db->fd, off);
     if (start == MAP_FAILED) {
-        panic("load page failed from off=%lld: %s", off, strerror(errno));
+        panic("search_and_try_write: load page failed from off=%lld: %s", off, strerror(errno));
     }
     char *buf = reinterpret_cast<char*>(start);
     uint16_t prev_off = 0;
@@ -226,12 +226,14 @@ uint16_t page_manager::search_and_try_write(off_t off, const char *data, uint16_
 void page_manager::free_over_page(off_t off, uint16_t freep, uint16_t n)
 {
     ASSERT_OFF(off);
+    lock_t lk(mtx);
     auto& over_page = over_page_map[off];
     ASSERT_AVAIL(over_page.avail + n);
     n = round4(n);
     over_page.avail += n;
     if (over_page.avail == db->header.page_size - OVER_PAGE_AVAIL_OFF) {
         // 如果该页没人使用了，就整个释放掉
+        recursive_lock_t lk(db->header_mtx);
         if (over_page.prev_off > 0) {
             lseek(db->fd, over_page.prev_off, SEEK_SET);
             write(db->fd, &over_page.next_off, sizeof(over_page.next_off));
@@ -247,7 +249,7 @@ void page_manager::free_over_page(off_t off, uint16_t freep, uint16_t n)
     remove_by_avail(off, over_page.avail);
     void *start = mmap(nullptr, db->header.page_size, PROT_READ | PROT_WRITE, MAP_SHARED, db->fd, off);
     if (start == MAP_FAILED) {
-        panic("load page failed from off=%lld: %s", off, strerror(errno));
+        panic("free_over_page: load page failed from off=%lld: %s", off, strerror(errno));
     }
     char *buf = reinterpret_cast<char*>(start);
     uint16_t cur_off = over_page.free_block_head;

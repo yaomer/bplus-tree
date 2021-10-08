@@ -1,7 +1,6 @@
 #include <unordered_set>
 
 #include <sys/stat.h>
-#include <signal.h>
 
 #include "db.h"
 
@@ -24,10 +23,9 @@ void panic(const char *fmt, ...)
 }
 }
 
-static bool can_flush = false;
-
 void DB::init()
 {
+    cur_tid = std::this_thread::get_id();
     comparator = [](const key_t& l, const key_t& r) {
         return std::less<key_t>()(l, r);
     };
@@ -35,10 +33,7 @@ void DB::init()
     if (dbname.back() != '/') dbname.push_back('/');
     mkdir(dbname.c_str(), 0777);
     dbfile = dbname + "dump.db";
-    fd = open(dbfile.c_str(), O_RDWR | O_CREAT, 0644);
-    if (fd < 0) {
-        panic("open(%s): %s", dbfile.c_str(), strerror(errno));
-    }
+    fd = open_db_file();
     limit.over_value = header.page_size / 16;
     translation_table.init();
     page_manager.init();
@@ -49,17 +44,16 @@ void DB::init()
     } else {
         root.reset(translation_table.load_node(header.root_off));
     }
-    signal(SIGALRM, [](int signo){ can_flush = true; alarm(CHECK_POINT_INTERVAL); });
-    alarm(CHECK_POINT_INTERVAL);
     redo_log.init();
 }
 
-void DB::flush_if_needed()
+int DB::open_db_file()
 {
-    if (can_flush) {
-        redo_log.check_point(FUZZY_CHECK_POINT);
-        can_flush = false;
+    int fd = open(dbfile.c_str(), O_RDWR | O_CREAT, 0644);
+    if (fd < 0) {
+        panic("open(%s): %s", dbfile.c_str(), strerror(errno));
     }
+    return fd;
 }
 
 void DB::set_key_comparator(Comparator comp)
@@ -87,11 +81,37 @@ void DB::set_page_cache_slots(int slots)
     translation_table.set_cache_cap(slots);
 }
 
+namespace bpdb {
+    thread_local bool hold_root = false; // 是否持有root_shmtx
+}
+
+#define __lock_shared_root() \
+    root_shmtx.lock_shared(); \
+    hold_root = true
+
+#define __lock_root() \
+    root_shmtx.lock(); \
+    hold_root = true
+
+#define __unlock_root() \
+    root_shmtx.unlock(); \
+    hold_root = false
+
+#define __unlock_shared(x) \
+    if (hold_root) { root_shmtx.unlock_shared(); hold_root = false; } \
+    else (x)->unlock_shared()
+
+#define __unlock(x) \
+    if (hold_root) { root_shmtx.unlock(); hold_root = false; } \
+    else (x)->unlock()
+
 bool DB::find(const std::string& key, std::string *value)
 {
+    __lock_shared_root();
     auto [x, i] = find(root.get(), key);
     if (x) {
         translation_table.load_real_value(x->values[i], value);
+        __unlock_shared(x);
         return true;
     }
     return false;
@@ -99,13 +119,20 @@ bool DB::find(const std::string& key, std::string *value)
 
 std::pair<node*, int> DB::find(node *x, const key_t& key)
 {
+    node *child;
     int i = search(x, key);
-    if (i == x->keys.size()) return { nullptr, 0 };
+    if (i == x->keys.size()) goto not_found;
     if (x->leaf) {
         if (equal(x->keys[i], key)) return { x, i };
-        else return { nullptr, 0 };
+        else goto not_found;
     }
-    return find(to_node(x->childs[i]), key);
+    child = to_node(x->childs[i]);
+    child->lock_shared();
+    __unlock_shared(x);
+    return find(child, key);
+not_found:
+    __unlock_shared(x);
+    return { nullptr, 0 };
 }
 
 value_t *DB::build_new_value(const std::string& value)
@@ -123,28 +150,31 @@ value_t *DB::build_new_value(const std::string& value)
 void DB::insert(const std::string& key, const std::string& value)
 {
     if (!check_limit(key, value)) return;
+    wait_if_check_point();
+    sync_check_point++;
     redo_log.append(LOG_TYPE_INSERT, &key, &value);
     value_t *v = build_new_value(value);
+    __lock_root();
     node *r = root.get();
     if (isfull(r, key, v)) {
         root.release();
         root.reset(new node(false));
         root->resize(1);
+        lock_header();
         root->childs[0] = header.root_off;
         translation_table.put(header.root_off, r);
         header.root_off = page_manager.alloc_page();
+        unlock_header();
         split(root.get(), 0, key);
     }
     insert(root.get(), key, v);
-    redo_log.put_complete();
-    flush_if_needed();
+    sync_check_point--;
 }
 
 void DB::insert(node *x, const key_t& key, value_t *value)
 {
     int i = search(x, key);
     int n = x->keys.size();
-    redo_log.put_change_node(x);
     if (x->leaf) {
         if (i < n && equal(x->keys[i], key)) {
             translation_table.free_value(x->values[i]);
@@ -154,25 +184,53 @@ void DB::insert(node *x, const key_t& key, value_t *value)
             for (int j = n - 2; j >= i; j--) {
                 x->copy(j + 1, j);
             }
-            if (less(key, to_node(header.leaf_off)->keys[0])) header.leaf_off = to_off(x);
-            if (less(to_node(header.last_off)->keys.back(), key)) header.last_off = to_off(x);
             x->keys[i] = key;
             x->values[i] = value;
+            lock_header();
+            node *leaf = to_node(header.leaf_off);
+            node *last = to_node(header.last_off);
+            if (x != leaf) {
+                leaf->lock_shared();
+                if (less(key, leaf->keys[0])) header.leaf_off = to_off(x);
+                leaf->unlock_shared();
+            }
+            if (x != last) {
+                last->lock_shared();
+                if (less(last->keys.back(), key)) header.last_off = to_off(x);
+                last->unlock_shared();
+            }
             header.key_nums++;
+            unlock_header();
         }
         x->update();
+        __unlock(x);
     } else {
         if (i == n) {
             x->keys[--i] = key;
             x->update();
         }
-        if (isfull(to_node(x->childs[i]), key, value)) {
+        // 我们先尝试获取子节点的写锁
+        //
+        // 1) 如果子节点是满的，需要进行分裂，那么我们就同时持有父子节点的写锁，
+        // 直至分裂操作完成，然后进入2)
+        //
+        // 2) 如果子节点是安全的，那么我们就释放父节点的写锁，进入下一层
+        node *child = to_node(x->childs[i]);
+        child->lock();
+        if (isfull(child, key, value)) {
             split(x, i, key);
             // for mid-split, `last_off` should point to the split right child node
+            lock_header();
             if (header.last_off == x->childs[i]) header.last_off = x->childs[i + 1];
-            if (less(x->keys[i], key)) i++;
+            unlock_header();
+            if (less(x->keys[i], key)) {
+                child->unlock();
+                child = to_node(x->childs[++i]);
+                child->lock();
+            }
         }
-        insert(to_node(x->childs[i]), key, value);
+        __unlock(x);
+        insert(child, key, value);
     }
 }
 
@@ -199,9 +257,6 @@ void DB::split(node *x, int i, const key_t& key)
     if (z->leaf)
         link_leaf(z, y, type);
     x->update();
-    redo_log.put_change_node(x);
-    redo_log.put_change_node(y);
-    redo_log.put_change_node(z);
 }
 
 node *DB::split(node *x, int type)
@@ -238,13 +293,19 @@ int DB::get_split_type(node *x, const key_t& key)
 {
     int type = MID_SPLIT;
     if (x->leaf) {
+        lock_header();
         node *leaf = to_node(header.leaf_off);
         node *last = to_node(header.last_off);
+        if (leaf != x) leaf->lock_shared();
+        if (last != x) last->lock_shared();
+        unlock_header();
         if (x == last && less(last->keys.back(), key)) {
             type = RIGHT_INSERT_SPLIT;
         } else if (x == leaf && less(key, leaf->keys[0])) {
             type = LEFT_INSERT_SPLIT;
         }
+        if (last != x) last->unlock_shared();
+        if (leaf != x) leaf->unlock_shared();
     }
     return type;
 }
@@ -256,7 +317,6 @@ void DB::link_leaf(node *z, node *y, int type)
         z->left = y->left;
         if (y->left > 0) {
             node *r = to_node(y->left);
-            redo_log.put_change_node(r);
             r->right = to_off(z);
             r->dirty = true;
         }
@@ -266,7 +326,6 @@ void DB::link_leaf(node *z, node *y, int type)
         z->right = y->right;
         if (y->right > 0) {
             node *r = to_node(y->right);
-            redo_log.put_change_node(r);
             r->left = to_off(z);
             r->dirty = true;
         }
@@ -278,19 +337,26 @@ void DB::link_leaf(node *z, node *y, int type)
 
 void DB::erase(const key_t& key)
 {
+    wait_if_check_point();
+    sync_check_point++;
     redo_log.append(LOG_TYPE_ERASE, &key);
+    __lock_root();
     erase(root.get(), key, nullptr);
+    __lock_root();
     if (!root->leaf && root->keys.size() == 1) {
         off_t off = root->childs[0];
         node *r = to_node(off);
-        redo_log.remove_node(root.get());
         translation_table.release_root(r);
         root.reset(r);
+        __unlock_root();
+        lock_header();
         page_manager.free_page(header.root_off);
         header.root_off = off;
+        unlock_header();
+    } else {
+        __unlock_root();
     }
-    redo_log.put_complete();
-    flush_if_needed();
+    sync_check_point--;
 }
 
 void DB::erase(node *r, const key_t& key, node *precursor)
@@ -298,18 +364,21 @@ void DB::erase(node *r, const key_t& key, node *precursor)
     int i = search(r, key);
     int n = r->keys.size();
     if (i == n) return;
-    redo_log.put_change_node(r);
     if (r->leaf) {
         if (i < n && equal(r->keys[i], key)) {
             translation_table.free_value(r->values[i]);
             r->remove(i);
+            lock_header();
             header.key_nums--;
+            unlock_header();
         }
+        __unlock(r);
         return;
     }
     node *x = to_node(r->childs[i]);
-    redo_log.put_change_node(x);
+    if (x != precursor) x->lock();
     if (!precursor && (i < n && equal(r->keys[i], key))) {
+        // 这种情况下，我们就需要一直持有当前precursor的写锁，直至整个删除操作完成
         precursor = get_precursor(x);
     }
     if (precursor) {
@@ -318,18 +387,23 @@ void DB::erase(node *r, const key_t& key, node *precursor)
     }
     size_t t = header.page_size / 2;
     if (x->page_used >= t) {
+        __unlock(r);
         erase(x, key, precursor);
         return;
     }
     node *y = i - 1 >= 0 ? to_node(r->childs[i - 1]) : nullptr;
     node *z = i + 1 < r->keys.size() ? to_node(r->childs[i + 1]) : nullptr;
-    if (y) redo_log.put_change_node(y);
-    if (z) redo_log.put_change_node(z);
+    if (y && y != precursor) y->lock();
+    if (z && z != precursor) z->lock();
     if (y && y->page_used >= t) {
         borrow_from_left(r, x, y, i - 1);
+        __unlock(r);
+        y->unlock();
         erase(x, key, precursor);
     } else if (z && z->page_used >= t) {
         borrow_from_right(r, x, z, i);
+        __unlock(r);
+        z->unlock();
         erase(x, key, precursor);
     } else {
         if (y) {
@@ -337,12 +411,14 @@ void DB::erase(node *r, const key_t& key, node *precursor)
             r->remove(i - 1);
             r->childs[i - 1] = off;
             merge(y, x);
+            __unlock(r);
             erase(y, key, precursor);
         } else {
             off_t off = r->childs[i];
             r->remove(i);
             r->childs[i] = off;
             merge(x, z);
+            __unlock(r);
             erase(x, key, precursor);
         }
     }
@@ -350,8 +426,12 @@ void DB::erase(node *r, const key_t& key, node *precursor)
 
 node *DB::get_precursor(node *x)
 {
+    node *r = x;
     while (!x->leaf) {
-        x = to_node(x->childs[x->keys.size() - 1]);
+        node *y = to_node(x->childs[x->keys.size() - 1]);
+        y->lock();
+        if (x != r) x->unlock();
+        x = y;
     }
     return x;
 }
@@ -387,8 +467,10 @@ void DB::borrow_from_left(node *r, node *x, node *y, int i)
 
 void DB::merge(node *y, node *x)
 {
+    lock_header();
     if (header.leaf_off == to_off(x)) header.leaf_off = to_off(y);
     if (header.last_off == to_off(x)) header.last_off = to_off(y);
+    unlock_header();
     int xn = x->keys.size();
     int yn = y->keys.size();
     y->resize(yn + xn);
@@ -400,13 +482,11 @@ void DB::merge(node *y, node *x)
         y->right = x->right;
         if (x->right > 0) {
             node *r = to_node(x->right);
-            redo_log.put_change_node(r);
             r->left = to_off(y);
             r->dirty = true;
         }
     }
     x->resize(0);
-    redo_log.remove_node(x);
     translation_table.free_node(x);
     y->update();
 }

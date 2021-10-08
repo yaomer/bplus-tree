@@ -28,18 +28,19 @@ void redo_log::try_recovery()
     int cp_fd = open(check_point_file.c_str(), O_RDONLY);
     if (cp_fd < 0) checkpoint = 0;
     else read(cp_fd, &checkpoint, sizeof(checkpoint));
-    cur_lsn = next_lsn = checkpoint;
+    lsn = checkpoint;
     replay(checkpoint);
-    check_point(SHARP_CHECK_POINT);
+    check_point();
     unlink(log_file.c_str());
     unlink(check_point_file.c_str());
     close(log_fd);
     close(check_point_fd);
-    cur_lsn = next_lsn = 0;
+    lsn = 0;
 }
 
 void redo_log::append(char type, const std::string *key, const std::string *value)
 {
+    lock_t lk(log_mtx);
     uint8_t keylen;
     uint32_t valuelen;
     struct iovec iov[5];
@@ -61,8 +62,7 @@ void redo_log::append(char type, const std::string *key, const std::string *valu
             writev(log_fd, iov, 5);
             fsync(log_fd);
         }
-        cur_lsn = next_lsn;
-        next_lsn += sizeof(type) + sizeof(keylen) + keylen + sizeof(valuelen) + valuelen;
+        lsn += sizeof(type) + sizeof(keylen) + keylen + sizeof(valuelen) + valuelen;
         break;
     case LOG_TYPE_ERASE:
         keylen = key->size();
@@ -74,8 +74,7 @@ void redo_log::append(char type, const std::string *key, const std::string *valu
             writev(log_fd, iov, 3);
             fsync(log_fd);
         }
-        cur_lsn = next_lsn;
-        next_lsn += sizeof(type) + sizeof(keylen) + keylen;
+        lsn += sizeof(type) + sizeof(keylen) + keylen;
         break;
     }
 }
@@ -115,39 +114,29 @@ void redo_log::replay(off_t checkpoint)
     recovery = false;
 }
 
-void redo_log::put_change_node(node *node)
+void redo_log::check_point()
 {
-    remove_node(node);
-    node->lsn = cur_lsn;
-    flush_list[cur_lsn].nodelist.emplace_back(node);
+    cv.notify_one();
 }
 
-void redo_log::put_complete()
+void redo_log::quit_check_point()
 {
-    flush_list[cur_lsn].header = db->header;
+    quit_cleaner = true;
+    check_point();
+    if (cleaner.joinable())
+        cleaner.join();
 }
 
-void redo_log::remove_node(node *node)
+void redo_log::clean_handler()
 {
-    auto it = flush_list.find(node->lsn);
-    if (it == flush_list.end()) return;
-    auto& nodelist = it->second.nodelist;
-    for (auto& x : nodelist) {
-        if (x == node) {
-            std::swap(x, nodelist.back());
-            nodelist.pop_back();
-            if (nodelist.empty()) flush_list.erase(node->lsn);
-            break;
-        }
-    }
-}
-
-void redo_log::check_point(char type)
-{
-    if (type == FUZZY_CHECK_POINT) {
-        fuzzy_check_point();
-    } else if (type == SHARP_CHECK_POINT) {
-        sharp_check_point();
+    while (!quit_cleaner) {
+        std::unique_lock<std::mutex> ulock(check_point_mtx);
+        cv.wait_for(ulock, std::chrono::seconds(10));
+        db->is_check_point = true;
+        while (db->sync_check_point > 0) ;
+        db->translation_table.flush();
+        write_check_point(lsn);
+        db->is_check_point = false;
     }
 }
 
@@ -156,57 +145,4 @@ void redo_log::write_check_point(off_t checkpoint)
     lseek(check_point_fd, 0, SEEK_SET);
     write(check_point_fd, &checkpoint, sizeof(checkpoint));
     fsync(check_point_fd);
-}
-
-void redo_log::fuzzy_check_point()
-{
-    header_t header;
-    int flush_pages = 0;
-    for (auto it = flush_list.begin(); it != flush_list.end(); ) {
-        auto e = it++;
-        off_t lsn = e->first;
-        auto& nodelist = e->second.nodelist;
-        for (auto node : nodelist) {
-            flush_node(node);
-        }
-        flush_pages += nodelist.size();
-        header = e->second.header;
-        flush_list.erase(lsn);
-        if (flush_pages >= FUZZY_CHECK_POINT_PAGES) {
-            write_check_point(lsn);
-            break;
-        }
-    }
-    if (flush_pages > 0) {
-        if (flush_pages < FUZZY_CHECK_POINT_PAGES) {
-            write_check_point(next_lsn);
-            db->translation_table.save_header(&db->header);
-        } else {
-            db->translation_table.save_header(&header);
-        }
-        fsync(db->fd);
-    }
-}
-
-void redo_log::sharp_check_point()
-{
-    for (auto& it : flush_list) {
-        for (auto node : it.second.nodelist) {
-            flush_node(node);
-        }
-    }
-    flush_list.clear();
-    // 就算什么也没做，我们也强制flush一次根节点
-    // 以便重启后可以成功load根节点
-    db->translation_table.save_node(db->header.root_off, db->root.get());
-    db->translation_table.save_header(&db->header);
-    fsync(db->fd);
-}
-
-void redo_log::flush_node(node *node)
-{
-    if (!node->dirty) return;
-    off_t off = db->translation_table.to_off(node);
-    db->translation_table.save_node(off, node);
-    node->dirty = false;
 }

@@ -4,6 +4,7 @@
 #include <map>
 #include <vector>
 #include <unordered_map>
+#include <mutex>
 
 namespace bpdb {
 
@@ -28,12 +29,14 @@ private:
         uint16_t avail;
         uint16_t free_block_head;
     };
-    void growth_file(off_t off);
     over_page_off_t write_new_over_page(const char *data, uint16_t n);
     uint16_t search_and_try_write(off_t off, const char *data, uint16_t n);
     void remove_by_avail(off_t off, uint16_t avail);
     std::unordered_map<off_t, over_page_info> over_page_map;
     std::map<uint16_t, std::vector<off_t>> avail_map;
+    // 1) 保护相应的内存数据结构
+    // 2) 间接保证不会同时修改同一个shared-over-page
+    std::mutex mtx;
 };
 }
 

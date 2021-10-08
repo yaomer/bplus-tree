@@ -3,6 +3,7 @@
 
 #include <string>
 #include <vector>
+#include <shared_mutex>
 
 #include <limits.h>
 
@@ -61,6 +62,11 @@ struct node {
         }
     }
 
+    void lock_shared() { shmtx.lock_shared(); }
+    void unlock_shared() { shmtx.unlock_shared(); }
+    void lock() { shmtx.lock(); }
+    void unlock() { shmtx.unlock(); }
+
     void resize(int n)
     {
         keys.resize(n);
@@ -102,8 +108,14 @@ struct node {
     std::vector<value_t*> values;
     size_t page_used;
     off_t left = 0, right = 0;
-    off_t lsn = 0;
+    // 保护节点本身以及对应的磁盘页
+    std::shared_mutex shmtx;
 };
+
+typedef std::lock_guard<std::mutex> lock_t;
+typedef std::shared_lock<std::shared_mutex> rlock_t;
+typedef std::unique_lock<std::shared_mutex> wlock_t;
+typedef std::lock_guard<std::recursive_mutex> recursive_lock_t;
 
 }
 

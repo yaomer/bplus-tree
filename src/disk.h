@@ -24,8 +24,6 @@ public:
 
     void init();
     void set_cache_cap(int cap) { lru_cap = std::max(128, cap); }
-    void save_header(header_t *header);
-    void save_node(off_t off, node *node);
     node *load_node(off_t off);
     void load_real_value(value_t *value, std::string *saved_val);
     void free_node(node *node);
@@ -35,6 +33,7 @@ public:
     off_t to_off(node *node);
     // 向转换表中加入一个新的表项
     void put(off_t off, node *node) { lru_put(off, node); }
+    void flush();
 private:
     struct cache_node {
         std::unique_ptr<node> x;
@@ -48,6 +47,8 @@ private:
 
     void fill_header(header_t *header, struct iovec *iov);
     void load_header();
+    void save_header(header_t *header);
+    void save_node(off_t off, node *node);
     void save_value(std::string& buf, value_t *value);
     value_t *load_value(char **ptr);
 
@@ -58,6 +59,7 @@ private:
     std::unordered_map<off_t, cache_node> translation_to_node;
     std::unordered_map<node*, off_t> translation_to_off;
     std::list<off_t> cache_list;
+    std::shared_mutex shmtx;
     int lru_cap;
 };
 }

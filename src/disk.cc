@@ -38,7 +38,8 @@ void translation_table::lru_put(off_t off, node *node)
         panic("lru_put: off=%lld exists", off);
     }
     if (cache_list.size() >= lru_cap) {
-        for (int i = 0; i < FUZZY_CHECK_POINT_PAGES; i++) {
+        int evict_nodes = cache_list.size() / 2;
+        for (int i = 0; i < evict_nodes; i++) {
             off_t evict_off = cache_list.back();
             auto *evict_node = translation_to_node[evict_off].x.get();
             if (evict_node->dirty) break;
@@ -55,6 +56,7 @@ void translation_table::lru_put(off_t off, node *node)
 node *translation_table::to_node(off_t off)
 {
     if (off == db->header.root_off) return db->root.get();
+    wlock_t wlock(shmtx);
     node *node = lru_get(off);
     if (node == nullptr) {
         node = load_node(off);
@@ -66,11 +68,27 @@ node *translation_table::to_node(off_t off)
 off_t translation_table::to_off(node *node)
 {
     if (node == db->root.get()) return db->header.root_off;
+    rlock_t rlock(shmtx);
     auto it = translation_to_off.find(node);
     if (it == translation_to_off.end()) {
         panic("to_off(%p)", node);
     }
     return it->second;
+}
+
+void translation_table::flush()
+{
+    for (auto& [node, off] : translation_to_off) {
+        if (node->dirty) {
+            save_node(off, node);
+            node->dirty = false;
+        }
+    }
+    // 就算什么也没做，我们也强制flush一次根节点
+    // 以便重启后可以成功load根节点
+    save_node(db->header.root_off, db->root.get());
+    save_header(&db->header);
+    fsync(db->fd);
 }
 
 // ########################### file-header ###########################
@@ -256,7 +274,7 @@ node *translation_table::load_node(off_t off)
 {
     void *start = mmap(nullptr, db->header.page_size, PROT_READ, MAP_SHARED, db->fd, off);
     if (start == MAP_FAILED) {
-        panic("load node failed from off=%lld: %s", off, strerror(errno));
+        panic("load_node: load node failed from off=%lld: %s", off, strerror(errno));
     }
     char *buf = reinterpret_cast<char*>(start);
     uint8_t leaf = decode8(&buf);
@@ -320,7 +338,7 @@ void translation_table::load_real_value(value_t *value, std::string *saved_val)
     while (true) {
         void *start = mmap(nullptr, db->header.page_size, PROT_READ, MAP_SHARED, db->fd, off);
         if (start == MAP_FAILED) {
-            panic("load page failed from off=%lld: %s", off, strerror(errno));
+            panic("load_real_value: load page failed from off=%lld: %s", off, strerror(errno));
         }
         char *buf = reinterpret_cast<char*>(start);
         off = decodeoff(&buf);
@@ -342,14 +360,15 @@ void translation_table::load_real_value(value_t *value, std::string *saved_val)
 
 void translation_table::free_value(value_t *value)
 {
+    int fd = db->get_db_fd();
     uint32_t len = value->reallen;
     if (len > limit.over_value) {
         off_t off = value->over_page_off;
         len -= OVER_VALUE_LEN;
         while (true) {
             off_t next_off;
-            lseek(db->fd, off, SEEK_SET);
-            read(db->fd, &next_off, sizeof(off_t));
+            lseek(fd, off, SEEK_SET);
+            read(fd, &next_off, sizeof(off_t));
             if (len >= CAP_OF_OVER_PAGE) {
                 db->page_manager.free_page(off);
                 len -= CAP_OF_OVER_PAGE;
@@ -364,6 +383,7 @@ void translation_table::free_value(value_t *value)
             }
         }
     }
+    db->put_db_fd(fd);
     delete value;
 }
 

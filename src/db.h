@@ -28,7 +28,7 @@ public:
     {
         init();
     }
-    ~DB() { redo_log.check_point(SHARP_CHECK_POINT); }
+    ~DB() { redo_log.quit_check_point(); }
     DB(const DB&) = delete;
     DB& operator=(const DB&) = delete;
 
@@ -63,7 +63,17 @@ public:
     void rebuild();
 private:
     void init();
-    void flush_if_needed();
+    int open_db_file();
+
+    bool is_main_thread() { return std::this_thread::get_id() == cur_tid; }
+    int get_db_fd() { return is_main_thread() ? fd : open_db_file(); }
+    void put_db_fd(int fd) { if (!is_main_thread()) close(fd); }
+
+    void lock_header() { header_mtx.lock(); }
+    void unlock_header() { header_mtx.unlock(); }
+
+    // 简单轮询以等待后台check_point()结束
+    void wait_if_check_point() { if (is_check_point) while(is_check_point) ; }
 
     node *to_node(off_t off) { return translation_table.to_node(off); }
     off_t to_off(node *node) { return translation_table.to_off(node); }
@@ -100,8 +110,19 @@ private:
     int fd;
     std::string dbname;
     std::string dbfile;
+    std::thread::id cur_tid;
+    // 每个线程执行修改操作时先递增sync_check_point，修改完成后再递减
+    // 我们在做check_point()之前要保证sync_check_point=0，以保证刷脏页时数据库状态的一致性
+    std::atomic_int sync_check_point = 0;
+    // 正在进行check_point()，写操作将暂时阻塞
+    std::atomic_bool is_check_point = false;
     header_t header;
+    // 对header.page_size的并发访问是没有问题的，因为它不能在运行时更改
+    std::recursive_mutex header_mtx;
     std::unique_ptr<node> root; // 根节点常驻内存
+    // 保护根节点，因为root本身可能会被修改，所以我们不能直接使用root->lock()
+    // 那样是不安全的
+    std::shared_mutex root_shmtx;
     translation_table translation_table;
     page_manager page_manager;
     redo_log redo_log;
