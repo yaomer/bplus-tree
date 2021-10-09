@@ -10,37 +10,24 @@ using namespace bpdb;
 void redo_log::init()
 {
     log_file = db->dbname + "redo.log";
-    check_point_file = db->dbname + "checkpoint";
     if ((log_fd = open(log_file.c_str(), O_RDWR | O_APPEND)) < 0) {
         if (errno != ENOENT) {
             panic("redo_log: open(%s): %s", log_file.c_str(), strerror(errno));
         }
+        open_log_file();
     } else {
-        try_recovery();
+        replay();
+        check_point();
     }
-    log_fd = open(log_file.c_str(), O_RDWR | O_APPEND | O_CREAT, 0666);
-    check_point_fd = open(check_point_file.c_str(), O_RDWR | O_TRUNC | O_CREAT, 0666);
 }
 
-void redo_log::try_recovery()
+void redo_log::open_log_file()
 {
-    off_t checkpoint;
-    int cp_fd = open(check_point_file.c_str(), O_RDONLY);
-    if (cp_fd < 0) checkpoint = 0;
-    else read(cp_fd, &checkpoint, sizeof(checkpoint));
-    lsn = checkpoint;
-    replay(checkpoint);
-    check_point();
-    unlink(log_file.c_str());
-    unlink(check_point_file.c_str());
-    close(log_fd);
-    close(check_point_fd);
-    lsn = 0;
+    log_fd = open(log_file.c_str(), O_RDWR | O_APPEND | O_CREAT, 0666);
 }
 
 void redo_log::append(char type, const std::string *key, const std::string *value)
 {
-    lock_t lk(log_mtx);
     uint8_t keylen;
     uint32_t valuelen;
     struct iovec iov[5];
@@ -58,11 +45,7 @@ void redo_log::append(char type, const std::string *key, const std::string *valu
         iov[3].iov_len = sizeof(valuelen);
         iov[4].iov_base = const_cast<char*>(value->data());
         iov[4].iov_len = valuelen;
-        if (!recovery) {
-            writev(log_fd, iov, 5);
-            fsync(log_fd);
-        }
-        lsn += sizeof(type) + sizeof(keylen) + keylen + sizeof(valuelen) + valuelen;
+        sync_log(iov, 5);
         break;
     case LOG_TYPE_ERASE:
         keylen = key->size();
@@ -70,29 +53,29 @@ void redo_log::append(char type, const std::string *key, const std::string *valu
         iov[1].iov_len = sizeof(keylen);
         iov[2].iov_base = const_cast<char*>(key->data());
         iov[2].iov_len = keylen;
-        if (!recovery) {
-            writev(log_fd, iov, 3);
-            fsync(log_fd);
-        }
-        lsn += sizeof(type) + sizeof(keylen) + keylen;
+        sync_log(iov, 3);
         break;
     }
 }
 
-void redo_log::replay(off_t checkpoint)
+void redo_log::sync_log(struct iovec *iov, int len)
+{
+    lock_t lk(log_mtx);
+    if (!recovery) {
+        writev(log_fd, iov, len);
+        fsync(log_fd);
+    }
+}
+
+void redo_log::replay()
 {
     recovery = true;
-    int pagesize = getpagesize();
-    int n = checkpoint / pagesize;
-    int off = checkpoint % pagesize;
     struct stat st;
     fstat(log_fd, &st);
     if (st.st_size == 0) return;
-    off_t map_start = n * pagesize;
-    size_t map_size = st.st_size - map_start;
-    void *start = mmap(nullptr, map_size, PROT_READ, MAP_SHARED, log_fd, map_start);
-    char *ptr = reinterpret_cast<char*>(start) + off;
-    char *end = ptr + map_size - off;
+    void *start = mmap(nullptr, st.st_size, PROT_READ, MAP_SHARED, log_fd, 0);
+    char *ptr = reinterpret_cast<char*>(start);
+    char *end = ptr + st.st_size;
     std::string key, value;
     while (ptr < end) {
         char type = *ptr++;
@@ -110,7 +93,7 @@ void redo_log::replay(off_t checkpoint)
             panic("replay: unknown type");
         }
     }
-    munmap(start, map_size);
+    munmap(start, st.st_size);
     recovery = false;
 }
 
@@ -135,14 +118,9 @@ void redo_log::clean_handler()
         db->is_check_point = true;
         while (db->sync_check_point > 0) ;
         db->translation_table.flush();
-        write_check_point(lsn);
+        unlink(log_file.c_str());
+        close(log_fd);
+        if (!quit_cleaner) open_log_file();
         db->is_check_point = false;
     }
-}
-
-void redo_log::write_check_point(off_t checkpoint)
-{
-    lseek(check_point_fd, 0, SEEK_SET);
-    write(check_point_fd, &checkpoint, sizeof(checkpoint));
-    fsync(check_point_fd);
 }

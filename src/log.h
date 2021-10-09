@@ -8,6 +8,8 @@
 #include <condition_variable>
 #include <thread>
 
+#include <sys/uio.h>
+
 #include "common.h"
 
 namespace bpdb {
@@ -23,16 +25,14 @@ public:
     void append(char type, const std::string *key, const std::string *value = nullptr);
     void quit_check_point();
 private:
-    void try_recovery();
+    void open_log_file();
+    void sync_log(struct iovec *iov, int len);
     void clean_handler();
-    void replay(off_t checkpoint);
+    void replay();
     void check_point();
-    void write_check_point(off_t checkpoint);
     DB *db;
     int log_fd;
-    int check_point_fd;
     std::string log_file;
-    std::string check_point_file;
     bool recovery = false;
     std::mutex log_mtx;
     std::mutex check_point_mtx;
@@ -40,7 +40,7 @@ private:
     std::atomic_bool quit_cleaner;
     std::thread cleaner;
     // LSN(Log Sequence Number)
-    off_t lsn = 0;
+    // off_t lsn = 0; // We don't need for now
 };
 }
 

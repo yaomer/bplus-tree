@@ -92,6 +92,7 @@ private:
     enum { RIGHT_INSERT_SPLIT, LEFT_INSERT_SPLIT, MID_SPLIT };
     int get_split_type(node *x, const key_t& key);
     void link_leaf(node *z, node *y, int type);
+    void update_header_in_insert(node *x, const key_t& key);
 
     node *get_precursor(node *x);
     void borrow_from_right(node *r, node *x, node *z, int i);

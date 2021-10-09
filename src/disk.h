@@ -32,7 +32,7 @@ public:
     node *to_node(off_t off);
     off_t to_off(node *node);
     // 向转换表中加入一个新的表项
-    void put(off_t off, node *node) { lru_put(off, node); }
+    void put(off_t off, node *node);
     void flush();
 private:
     struct cache_node {

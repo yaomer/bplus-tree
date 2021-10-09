@@ -38,14 +38,16 @@ void translation_table::lru_put(off_t off, node *node)
         panic("lru_put: off=%lld exists", off);
     }
     if (cache_list.size() >= lru_cap) {
-        int evict_nodes = cache_list.size() / 2;
-        for (int i = 0; i < evict_nodes; i++) {
-            off_t evict_off = cache_list.back();
-            auto *evict_node = translation_to_node[evict_off].x.get();
-            if (evict_node->dirty) break;
-            translation_to_off.erase(evict_node);
-            translation_to_node.erase(evict_off);
-            cache_list.pop_back();
+        off_t evict_off = cache_list.back();
+        auto *evict_node = translation_to_node[evict_off].x.get();
+        if (evict_node->shmtx.try_lock()) {
+            if (!evict_node->dirty && !evict_node->maybe_using) {
+                translation_to_off.erase(evict_node);
+                translation_to_node.erase(evict_off);
+                cache_list.pop_back();
+            } else {
+                evict_node->unlock();
+            }
         }
     }
     cache_list.push_front(off);
@@ -56,12 +58,13 @@ void translation_table::lru_put(off_t off, node *node)
 node *translation_table::to_node(off_t off)
 {
     if (off == db->header.root_off) return db->root.get();
-    wlock_t wlock(shmtx);
+    wlock_t wlk(shmtx);
     node *node = lru_get(off);
     if (node == nullptr) {
         node = load_node(off);
         lru_put(off, node);
     }
+    node->maybe_using = true;
     return node;
 }
 
@@ -76,13 +79,21 @@ off_t translation_table::to_off(node *node)
     return it->second;
 }
 
+void translation_table::put(off_t off, node *node)
+{
+    wlock_t wlk(shmtx);
+    lru_put(off, node);
+}
+
 void translation_table::flush()
 {
+    wlock_t wlk(shmtx);
     for (auto& [node, off] : translation_to_off) {
         if (node->dirty) {
             save_node(off, node);
             node->dirty = false;
         }
+        node->maybe_using = false;
     }
     // 就算什么也没做，我们也强制flush一次根节点
     // 以便重启后可以成功load根节点
@@ -92,7 +103,7 @@ void translation_table::flush()
 }
 
 // ########################### file-header ###########################
-// [magic][page-size][key-nums][root-off][leaf-off][last-off]
+// [magic][page-size][key-nums][root-off][leaf-off]
 // [free-list-head][free-pages][over-page-list-head][over-pages]
 void translation_table::fill_header(header_t *header, struct iovec *iov)
 {
@@ -106,19 +117,17 @@ void translation_table::fill_header(header_t *header, struct iovec *iov)
     iov[3].iov_len = sizeof(header->root_off);
     iov[4].iov_base = &header->leaf_off;
     iov[4].iov_len = sizeof(header->leaf_off);
-    iov[5].iov_base = &header->last_off;
-    iov[5].iov_len = sizeof(header->last_off);
-    iov[6].iov_base = &header->free_list_head;
-    iov[6].iov_len = sizeof(header->free_list_head);
-    iov[7].iov_base = &header->free_pages;
-    iov[7].iov_len = sizeof(header->free_pages);
-    iov[8].iov_base = &header->over_page_list_head;
-    iov[8].iov_len = sizeof(header->over_page_list_head);
-    iov[9].iov_base = &header->over_pages;
-    iov[9].iov_len = sizeof(header->over_pages);
+    iov[5].iov_base = &header->free_list_head;
+    iov[5].iov_len = sizeof(header->free_list_head);
+    iov[6].iov_base = &header->free_pages;
+    iov[6].iov_len = sizeof(header->free_pages);
+    iov[7].iov_base = &header->over_page_list_head;
+    iov[7].iov_len = sizeof(header->over_page_list_head);
+    iov[8].iov_base = &header->over_pages;
+    iov[8].iov_len = sizeof(header->over_pages);
 }
 
-#define HEADER_IOV_LEN 10
+#define HEADER_IOV_LEN 9
 
 void translation_table::save_header(header_t *header)
 {
@@ -390,6 +399,7 @@ void translation_table::free_value(value_t *value)
 void translation_table::free_node(node *node)
 {
     off_t off = to_off(node);
+    wlock_t wlk(shmtx);
     cache_list.erase(translation_to_node[off].pos);
     translation_to_off.erase(node);
     translation_to_node.erase(off);
@@ -399,6 +409,7 @@ void translation_table::free_node(node *node)
 void translation_table::release_root(node *root)
 {
     off_t off = to_off(root);
+    wlock_t wlk(shmtx);
     cache_list.erase(translation_to_node[off].pos);
     translation_to_node[off].x.release();
     translation_to_node.erase(off);

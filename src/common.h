@@ -25,7 +25,6 @@ struct header_t {
     size_t key_nums = 0;
     off_t root_off = 0;
     off_t leaf_off = 0;
-    off_t last_off = 0;
     off_t free_list_head = page_size;
     size_t free_pages = 0;
     off_t over_page_list_head = 0;
@@ -103,6 +102,7 @@ struct node {
 
     bool leaf;
     bool dirty = false;
+    bool maybe_using = false;
     std::vector<key_t> keys;
     std::vector<off_t> childs;
     std::vector<value_t*> values;

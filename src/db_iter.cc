@@ -41,11 +41,11 @@ DB::iterator& DB::iterator::seek_to_first()
 
 DB::iterator& DB::iterator::seek_to_last()
 {
-    if (db->header.key_nums > 0) {
-        off = db->header.last_off;
-        i = db->to_node(off)->keys.size() - 1;
-    }
-    return *this;
+    key_t key;
+    db->root_shmtx.lock_shared();
+    key = db->root->keys.back();
+    db->root_shmtx.unlock_shared();
+    return seek(key);
 }
 
 DB::iterator& DB::iterator::next()
