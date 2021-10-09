@@ -4,17 +4,17 @@ using namespace bpdb;
 
 bool DB::iterator::valid()
 {
-    return off > 0;
+    return page_id > 0;
 }
 
 const std::string& DB::iterator::key()
 {
-    return db->to_node(off)->keys[i];
+    return db->to_node(page_id)->keys[i];
 }
 
 const std::string& DB::iterator::value()
 {
-    value_t *v = db->to_node(off)->values[i];
+    value_t *v = db->to_node(page_id)->values[i];
     if (v->reallen <= limit.over_value) return *v->val;
     db->translation_table.load_real_value(v, &saved_value);
     return saved_value;
@@ -24,7 +24,7 @@ DB::iterator& DB::iterator::seek(const std::string& key)
 {
     auto [node, pos] = db->find(db->root.get(), key);
     if (node) {
-        off = db->to_off(node);
+        page_id = db->to_page_id(node);
         i = pos;
     }
     return *this;
@@ -33,7 +33,7 @@ DB::iterator& DB::iterator::seek(const std::string& key)
 DB::iterator& DB::iterator::seek_to_first()
 {
     if (db->header.key_nums > 0) {
-        off = db->header.leaf_off;
+        page_id = db->header.leaf_id;
         i = 0;
     }
     return *this;
@@ -50,11 +50,11 @@ DB::iterator& DB::iterator::seek_to_last()
 
 DB::iterator& DB::iterator::next()
 {
-    if (off > 0) {
-        node *x = db->to_node(off);
+    if (page_id > 0) {
+        node *x = db->to_node(page_id);
         if (i + 1 < x->keys.size()) i++;
         else {
-            off = x->right;
+            page_id = x->right;
             i = 0;
         }
     }
@@ -63,12 +63,12 @@ DB::iterator& DB::iterator::next()
 
 DB::iterator& DB::iterator::prev()
 {
-    if (off > 0) {
-        node *x = db->to_node(off);
+    if (page_id > 0) {
+        node *x = db->to_node(page_id);
         if (i - 1 >= 0) i--;
         else {
-            off = x->left;
-            if (off > 0) i = db->to_node(off)->keys.size() - 1;
+            page_id = x->left;
+            if (page_id > 0) i = db->to_node(page_id)->keys.size() - 1;
         }
     }
     return *this;

@@ -60,12 +60,12 @@ void DB::init()
     limit.over_value = header.page_size / 16;
     translation_table.init();
     page_manager.init();
-    if (header.root_off == 0) {
-        header.root_off = page_manager.alloc_page();
-        header.leaf_off = header.root_off;
+    if (header.root_id == 0) {
+        header.root_id = page_manager.alloc_page();
+        header.leaf_id = header.root_id;
         root.reset(new node(true));
     } else {
-        root.reset(translation_table.load_node(header.root_off));
+        root.reset(translation_table.load_node(header.root_id));
     }
     logger.init();
 }
@@ -159,9 +159,9 @@ void DB::insert(const std::string& key, const std::string& value)
         root.reset(new node(false));
         root->resize(1);
         lock_header();
-        root->childs[0] = header.root_off;
-        translation_table.put(header.root_off, r);
-        header.root_off = page_manager.alloc_page();
+        root->childs[0] = header.root_id;
+        translation_table.put(header.root_id, r);
+        header.root_id = page_manager.alloc_page();
         unlock_header();
         split(root.get(), 0, key);
     }
@@ -216,16 +216,16 @@ void DB::insert(node *x, const key_t& key, value_t *value)
 void DB::update_header_in_insert(node *x, const key_t& key)
 {
     lock_header();
-    off_t leaf_off = header.leaf_off;
+    page_id_t leaf_id = header.leaf_id;
     unlock_header();
     // 我们不能在lock_header()的情况下去lock(leaf)，这很可能会造成死锁
     // T1: hold(header), require(leaf)
     // T2: hold(leaf), require(header)
-    node *leaf = to_node(leaf_off);
+    node *leaf = to_node(leaf_id);
     // 因为我们并没有持有leaf的父节点，所以它可能会被其他线程删除掉
     if (leaf && leaf != x) leaf->lock_shared();
     lock_header();
-    if (leaf && less(key, leaf->keys[0])) header.leaf_off = to_off(x);
+    if (leaf && less(key, leaf->keys[0])) header.leaf_id = to_page_id(x);
     if (leaf && leaf != x) leaf->unlock_shared();
     header.key_nums++;
     unlock_header();
@@ -248,7 +248,7 @@ void DB::split(node *x, int i, const key_t& key)
         else if (type == RIGHT_INSERT_SPLIT) x->keys[n - 1] = key;
         else x->keys[n - 1] = y->keys.back();
     }
-    x->childs[i + 1] = to_off(z);
+    x->childs[i + 1] = to_page_id(z);
     if (type == LEFT_INSERT_SPLIT)
         std::swap(x->childs[i], x->childs[i + 1]);
     if (z->leaf)
@@ -302,27 +302,27 @@ int DB::get_split_type(node *x, const key_t& key)
 void DB::link_leaf(node *z, node *y, int type)
 {
     if (type == LEFT_INSERT_SPLIT) { // [z y]
-        z->right = to_off(y);
+        z->right = to_page_id(y);
         z->left = y->left;
         if (y->left > 0) {
             node *r = to_node(y->left);
             r->lock();
-            r->right = to_off(z);
+            r->right = to_page_id(z);
             r->dirty = true;
             r->unlock();
         }
-        y->left = to_off(z);
+        y->left = to_page_id(z);
     } else { // [y z]
-        z->left = to_off(y);
+        z->left = to_page_id(y);
         z->right = y->right;
         if (y->right > 0) {
             node *r = to_node(y->right);
             r->lock();
-            r->left = to_off(z);
+            r->left = to_page_id(z);
             r->dirty = true;
             r->unlock();
         }
-        y->right = to_off(z);
+        y->right = to_page_id(z);
     }
     z->dirty = true;
     y->dirty = true;
@@ -337,16 +337,16 @@ void DB::erase(const key_t& key)
     erase(root.get(), key, nullptr);
     __lock_root();
     if (!root->leaf && root->keys.size() == 1) {
-        off_t off = root->childs[0];
-        node *r = to_node(off);
+        page_id_t page_id = root->childs[0];
+        node *r = to_node(page_id);
         r->lock_shared();
         translation_table.release_root(r);
         r->unlock_shared();
         root.reset(r);
         __unlock_root();
         lock_header();
-        page_manager.free_page(header.root_off);
-        header.root_off = off;
+        page_manager.free_page(header.root_id);
+        header.root_id = page_id;
         unlock_header();
     } else {
         __unlock_root();
@@ -406,16 +406,16 @@ void DB::erase(node *r, const key_t& key, node *precursor)
     } else {
         if (y) {
             if (z && z != precursor) z->unlock();
-            off_t off = r->childs[i - 1];
+            page_id_t page_id = r->childs[i - 1];
             r->remove(i - 1);
-            r->childs[i - 1] = off;
+            r->childs[i - 1] = page_id;
             merge(y, x);
             __unlock(r);
             erase(y, key, precursor);
         } else {
-            off_t off = r->childs[i];
+            page_id_t page_id = r->childs[i];
             r->remove(i);
-            r->childs[i] = off;
+            r->childs[i] = page_id;
             merge(x, z);
             __unlock(r);
             erase(x, key, precursor);
@@ -467,7 +467,7 @@ void DB::borrow_from_left(node *r, node *x, node *y, int i)
 void DB::merge(node *y, node *x)
 {
     lock_header();
-    if (header.leaf_off == to_off(x)) header.leaf_off = to_off(y);
+    if (header.leaf_id == to_page_id(x)) header.leaf_id = to_page_id(y);
     unlock_header();
     int xn = x->keys.size();
     int yn = y->keys.size();
@@ -481,7 +481,7 @@ void DB::merge(node *y, node *x)
         if (x->right > 0) {
             node *r = to_node(x->right);
             r->lock();
-            r->left = to_off(y);
+            r->left = to_page_id(y);
             r->dirty = true;
             r->unlock();
         }
@@ -505,7 +505,7 @@ bool DB::isfull(node *x, const key_t& key, value_t *value)
     if (x->leaf) {
         page_used += (limit.key_len_field + key.size()) + (limit.value_len_field + std::min(limit.over_value, (size_t)value->reallen));
     } else {
-        page_used += (limit.key_len_field + limit.max_key) + sizeof(off_t);
+        page_used += (limit.key_len_field + limit.max_key) + sizeof(page_id_t);
     }
     return page_used > header.page_size;
 }

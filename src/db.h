@@ -47,7 +47,7 @@ public:
 
     class iterator {
     public:
-        iterator(DB *db) : db(db), off(0), i(0) {  }
+        iterator(DB *db) : db(db), page_id(0), i(0) {  }
         bool valid();
         const std::string& key();
         const std::string& value();
@@ -58,7 +58,7 @@ public:
         iterator& prev();
     private:
         DB *db;
-        off_t off;
+        page_id_t page_id;
         int i;
         std::string saved_value;
     };
@@ -83,8 +83,8 @@ private:
     // 简单轮询以等待后台check_point()结束
     void wait_if_check_point() { if (is_check_point) while(is_check_point) ; }
 
-    node *to_node(off_t off) { return translation_table.to_node(off); }
-    off_t to_off(node *node) { return translation_table.to_off(node); }
+    node *to_node(page_id_t page_id) { return translation_table.to_node(page_id); }
+    page_id_t to_page_id(node *node) { return translation_table.to_page_id(node); }
 
     int search(node *x, const key_t& key);
     bool check_limit(const std::string& key, const std::string& value);

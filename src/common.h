@@ -11,10 +11,12 @@ namespace bpdb {
 
 typedef std::string key_t;
 
+typedef off_t page_id_t;
+
 struct value_t {
     ~value_t() { delete val; }
-    off_t over_page_off = 0;
-    uint16_t remain_off = 0;
+    page_id_t over_page_id = 0;
+    uint16_t page_off = 0;
     uint32_t reallen;
     std::string *val;
 };
@@ -23,11 +25,11 @@ struct header_t {
     int8_t magic = 0x1a;
     size_t page_size = 1024 * 16;
     size_t key_nums = 0;
-    off_t root_off = 0;
-    off_t leaf_off = 0;
-    off_t free_list_head = page_size;
+    page_id_t root_id = 0;
+    page_id_t leaf_id = 0;
+    page_id_t free_list_head = page_size;
     size_t free_pages = 0;
-    off_t over_page_list_head = 0;
+    page_id_t over_page_list_head = 0;
     size_t over_pages = 0;
 };
 
@@ -50,7 +52,7 @@ struct node {
     node(bool leaf) : leaf(leaf)
     {
         page_used = limit.type_field + limit.key_nums_field;
-        if (leaf) page_used += sizeof(off_t) * 2; // left and right
+        if (leaf) page_used += sizeof(page_id_t) * 2; // left and right
     }
     ~node()
     {
@@ -111,10 +113,10 @@ struct node {
     bool maybe_using = false;
     bool deleted = false;
     std::vector<key_t> keys;
-    std::vector<off_t> childs;
+    std::vector<page_id_t> childs;
     std::vector<value_t*> values;
     size_t page_used;
-    off_t left = 0, right = 0;
+    page_id_t left = 0, right = 0;
     // 保护节点本身以及对应的磁盘页
     std::shared_mutex shmtx;
 };

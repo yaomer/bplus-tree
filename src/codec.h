@@ -3,6 +3,8 @@
 
 #include <string>
 
+#include "common.h"
+
 namespace bpdb {
 
 inline void encode8(std::string& buf, uint8_t n)
@@ -20,9 +22,9 @@ inline void encode32(std::string& buf, uint32_t n)
     buf.append(reinterpret_cast<char*>(&n), 4);
 }
 
-inline void encodeoff(std::string& buf, off_t off)
+inline void encode_page_id(std::string& buf, page_id_t page_id)
 {
-    buf.append(reinterpret_cast<char*>(&off), sizeof(off));
+    buf.append(reinterpret_cast<char*>(&page_id), sizeof(page_id));
 }
 
 inline uint8_t decode8(char **ptr)
@@ -46,11 +48,11 @@ inline uint32_t decode32(char **ptr)
     return n;
 }
 
-inline off_t decodeoff(char **ptr)
+inline page_id_t decode_page_id(char **ptr)
 {
-    off_t n = *reinterpret_cast<off_t*>(*ptr);
-    *ptr += sizeof(n);
-    return n;
+    page_id_t page_id = *reinterpret_cast<page_id_t*>(*ptr);
+    *ptr += sizeof(page_id);
+    return page_id;
 }
 
 }

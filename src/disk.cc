@@ -15,13 +15,13 @@ void translation_table::init()
 void translation_table::clear()
 {
     translation_to_node.clear();
-    translation_to_off.clear();
+    translation_to_page.clear();
     cache_list.clear();
 }
 
-node *translation_table::lru_get(off_t off)
+node *translation_table::lru_get(page_id_t page_id)
 {
-    auto it = translation_to_node.find(off);
+    auto it = translation_to_node.find(page_id);
     if (it == translation_to_node.end()) return nullptr;
     if (it->second.pos != cache_list.begin()) {
         cache_list.erase(it->second.pos);
@@ -31,88 +31,88 @@ node *translation_table::lru_get(off_t off)
     return it->second.x.get();
 }
 
-// 放入的<off, node>一定是原先不存在的
-void translation_table::lru_put(off_t off, node *node)
+// 放入的<page_id, node>一定是原先不存在的
+void translation_table::lru_put(page_id_t page_id, node *node)
 {
-    if (translation_to_node.count(off)) {
-        panic("lru_put: off=%lld exists", off);
+    if (translation_to_node.count(page_id)) {
+        panic("lru_put: page_id=%lld exists", page_id);
     }
     if (cache_list.size() >= lru_cap) {
-        off_t evict_off = cache_list.back();
-        auto *evict_node = translation_to_node[evict_off].x.get();
+        page_id_t evict_page_id = cache_list.back();
+        auto *evict_node = translation_to_node[evict_page_id].x.get();
         if (evict_node->shmtx.try_lock()) {
             if (!evict_node->deleted && !evict_node->dirty && !evict_node->maybe_using) {
-                translation_to_off.erase(evict_node);
-                translation_to_node.erase(evict_off);
+                translation_to_page.erase(evict_node);
+                translation_to_node.erase(evict_page_id);
                 cache_list.pop_back();
             } else {
                 evict_node->unlock();
             }
         }
     }
-    cache_list.push_front(off);
-    translation_to_node.emplace(off, cache_node(node, cache_list.begin()));
-    translation_to_off.emplace(node, off);
+    cache_list.push_front(page_id);
+    translation_to_node.emplace(page_id, cache_node(node, cache_list.begin()));
+    translation_to_page.emplace(node, page_id);
 }
 
-node *translation_table::to_node(off_t off)
+node *translation_table::to_node(page_id_t page_id)
 {
-    if (off == db->header.root_off) return db->root.get();
+    if (page_id == db->header.root_id) return db->root.get();
     wlock_t wlk(shmtx);
-    node *node = lru_get(off);
+    node *node = lru_get(page_id);
     if (node == nullptr) {
-        node = load_node(off);
-        lru_put(off, node);
+        node = load_node(page_id);
+        lru_put(page_id, node);
     }
     if (node->deleted) return nullptr;
     node->maybe_using = true;
     return node;
 }
 
-off_t translation_table::to_off(node *node)
+page_id_t translation_table::to_page_id(node *node)
 {
-    if (node == db->root.get()) return db->header.root_off;
+    if (node == db->root.get()) return db->header.root_id;
     rlock_t rlock(shmtx);
-    auto it = translation_to_off.find(node);
-    if (it == translation_to_off.end()) {
-        panic("to_off(%p)", node);
+    auto it = translation_to_page.find(node);
+    if (it == translation_to_page.end()) {
+        panic("to_page_id(%p)", node);
     }
     return it->second;
 }
 
-void translation_table::put(off_t off, node *node)
+void translation_table::put(page_id_t page_id, node *node)
 {
     wlock_t wlk(shmtx);
-    lru_put(off, node);
+    lru_put(page_id, node);
 }
 
 void translation_table::flush()
 {
     wlock_t wlk(shmtx);
     std::vector<node*> del_nodes;
-    for (auto& [node, off] : translation_to_off) {
+    for (auto& [node, page_id] : translation_to_page) {
         if (node->deleted) {
             del_nodes.push_back(node);
             continue;
         }
         if (node->dirty) {
-            save_node(off, node);
+            save_node(page_id, node);
             node->dirty = false;
         }
         node->maybe_using = false;
     }
     for (auto node : del_nodes) {
-        free_node(translation_to_off[node], node);
+        free_node(translation_to_page[node], node);
     }
     // 就算什么也没做，我们也强制flush一次根节点
     // 以便重启后可以成功load根节点
-    save_node(db->header.root_off, db->root.get());
+    save_node(db->header.root_id, db->root.get());
     save_header(&db->header);
     fsync(db->fd);
 }
 
 // ########################### file-header ###########################
-// [magic][page-size][key-nums][root-off][leaf-off]
+// [magic][page-size][key-nums][root-id][leaf-id]
 // [free-list-head][free-pages][over-page-list-head][over-pages]
 void translation_table::fill_header(header_t *header, struct iovec *iov)
 {
@@ -122,10 +122,10 @@ void translation_table::fill_header(header_t *header, struct iovec *iov)
     iov[1].iov_len = sizeof(header->page_size);
     iov[2].iov_base = &header->key_nums;
     iov[2].iov_len = sizeof(header->key_nums);
-    iov[3].iov_base = &header->root_off;
-    iov[3].iov_len = sizeof(header->root_off);
-    iov[4].iov_base = &header->leaf_off;
-    iov[4].iov_len = sizeof(header->leaf_off);
+    iov[3].iov_base = &header->root_id;
+    iov[3].iov_len = sizeof(header->root_id);
+    iov[4].iov_base = &header->leaf_id;
+    iov[4].iov_len = sizeof(header->leaf_id);
     iov[5].iov_base = &header->free_list_head;
     iov[5].iov_len = sizeof(header->free_list_head);
     iov[6].iov_base = &header->free_pages;
@@ -162,16 +162,6 @@ void translation_table::load_header()
     readv(db->fd, iov, HEADER_IOV_LEN);
 }
 
-// ############################# node #############################
-// [leaf]
-// [key-nums]
-// all-keys [key -> [key-len] [key]]
-// ########################### inner-node ###########################
-// all-child-offs
-// ########################### leaf-node ###########################
-// all-values [value -> [value-len] [value] (over-pages)]
-// left-off right-off
-//
 void node::update(bool dirty)
 {
     page_used = limit.type_field + limit.key_nums_field;
@@ -180,14 +170,14 @@ void node::update(bool dirty)
         for (auto& value : values)  {
             page_used += limit.value_len_field + std::min(limit.over_value, (size_t)value->reallen);
         }
-        page_used += sizeof(off_t) * 2;
+        page_used += sizeof(page_id_t) * 2;
     } else {
-        page_used += sizeof(off_t) * childs.size();
+        page_used += sizeof(page_id_t) * childs.size();
     }
     this->dirty = dirty;
 }
 
-void translation_table::save_node(off_t off, node *node)
+void translation_table::save_node(page_id_t page_id, node *node)
 {
     std::string buf;
     buf.reserve(node->page_used);
@@ -201,22 +191,22 @@ void translation_table::save_node(off_t off, node *node)
         for (auto& value : node->values) {
             save_value(buf, value);
         }
-        encodeoff(buf, node->left);
-        encodeoff(buf, node->right);
+        encode_page_id(buf, node->left);
+        encode_page_id(buf, node->right);
     } else {
-        for (auto& child_off : node->childs) {
-            encodeoff(buf, child_off);
+        for (auto& child_page_id : node->childs) {
+            encode_page_id(buf, child_page_id);
         }
     }
-    lseek(db->fd, off, SEEK_SET);
+    lseek(db->fd, page_id, SEEK_SET);
     // 如果没有写满一页的话，也不会有什么问题，文件空洞是允许的
     write(db->fd, buf.data(), buf.size());
 }
 
-#define CAP_OF_OVER_PAGE (db->header.page_size - sizeof(off_t))
+#define CAP_OF_OVER_PAGE (db->header.page_size - sizeof(page_id_t))
 #define CAP_OF_SHARED_OVER_PAGE (CAP_OF_OVER_PAGE - 8)
 
-#define OVER_VALUE_LEN (limit.over_value - sizeof(off_t) - 2)
+#define OVER_VALUE_LEN (limit.over_value - sizeof(page_id_t) - 2)
 
 void translation_table::save_value(std::string& buf, value_t *value)
 {
@@ -227,16 +217,16 @@ void translation_table::save_value(std::string& buf, value_t *value)
         return;
     }
     // over-value:
-    // -----------------------------------------------------------------
-    // |  4 bytes  |   8 bytes     |  2 bytes   | limit.over_value - 10 |
-    // | value-len | over-page-off | remain-off |        value          |
-    // -----------------------------------------------------------------
-    // over-page: [next-over-page-off][data]
+    // --------------------------------------------------------------
+    // |  4 bytes  |   8 bytes    | 2 bytes  | limit.over_value - 10 |
+    // | value-len | over-page-id | page-off |        value          |
+    // --------------------------------------------------------------
+    // over-page: [next-over-page-id][data]
     size_t pos = OVER_VALUE_LEN;
     // 我们只需将存储到叶节点本身的部分数据写入磁盘即可
-    if (value->over_page_off > 0) {
-        encodeoff(buf, value->over_page_off);
-        encode16(buf, value->remain_off);
+    if (value->over_page_id > 0) {
+        encode_page_id(buf, value->over_page_id);
+        encode16(buf, value->page_off);
         buf.append(value->val->data(), pos);
         return;
     }
@@ -252,47 +242,47 @@ void translation_table::save_value(std::string& buf, value_t *value)
         r = 0;
     }
 
-    over_page_off_t over_page;
+    over_page_id_t over_page;
     if (r > 0) {
         size_t roff = pos + n * CAP_OF_OVER_PAGE;
         over_page = db->page_manager.write_over_page(value->val->data() + roff, r);
-        value->remain_off = over_page.second;
+        value->page_off = over_page.second;
     }
 
     n = pages.size();
-    value->over_page_off = n > 0 ? db->page_manager.alloc_page() : over_page.first;
+    value->over_page_id = n > 0 ? db->page_manager.alloc_page() : over_page.first;
 
-    off_t off = value->over_page_off;
+    page_id_t page_id = value->over_page_id;
     for (int i = 0; i < n; i++) {
         struct iovec iov[2];
-        off_t next_off;
+        page_id_t next_page_id;
         if (i == n - 1) {
-            next_off = r > 0 ? over_page.first : 0;
+            next_page_id = r > 0 ? over_page.first : 0;
         } else {
-            next_off = db->page_manager.alloc_page();
+            next_page_id = db->page_manager.alloc_page();
         }
-        iov[0].iov_base = &next_off;
-        iov[0].iov_len = sizeof(next_off);
+        iov[0].iov_base = &next_page_id;
+        iov[0].iov_len = sizeof(next_page_id);
         iov[1].iov_base = value->val->data() + pos;
         iov[1].iov_len = pages[i];
         pos += pages[i];
-        lseek(db->fd, off, SEEK_SET);
+        lseek(db->fd, page_id, SEEK_SET);
         writev(db->fd, iov, 2);
-        off = next_off;
+        page_id = next_page_id;
     }
-    encodeoff(buf, value->over_page_off);
-    encode16(buf, value->remain_off);
+    encode_page_id(buf, value->over_page_id);
+    encode16(buf, value->page_off);
     // 这里的value->val只是指向用户传入进来的value的指针，并不持有它
     // 插入后我们只需保留存储在叶节点本身的前面部分值即可
     value->val = new std::string(value->val->data(), OVER_VALUE_LEN);
     buf.append(*value->val);
 }
 
-node *translation_table::load_node(off_t off)
+node *translation_table::load_node(page_id_t page_id)
 {
-    void *start = mmap(nullptr, db->header.page_size, PROT_READ, MAP_SHARED, db->fd, off);
+    void *start = mmap(nullptr, db->header.page_size, PROT_READ, MAP_SHARED, db->fd, page_id);
     if (start == MAP_FAILED) {
-        panic("load_node: load node failed from off=%lld: %s", off, strerror(errno));
+        panic("load_node: load node failed from page_id=%lld: %s", page_id, strerror(errno));
     }
     char *buf = reinterpret_cast<char*>(start);
     uint8_t leaf = decode8(&buf);
@@ -309,12 +299,12 @@ node *translation_table::load_node(off_t off)
         for (int i = 0; i < keynums; i++) {
             node->values.emplace_back(load_value(&buf));
         }
-        node->left = decodeoff(&buf);
-        node->right = decodeoff(&buf);
+        node->left = decode_page_id(&buf);
+        node->right = decode_page_id(&buf);
     } else {
         node->childs.reserve(keynums);
         for (int i = 0; i < keynums; i++) {
-            node->childs.emplace_back(decodeoff(&buf));
+            node->childs.emplace_back(decode_page_id(&buf));
         }
     }
     node->update(false);
@@ -334,8 +324,8 @@ value_t *translation_table::load_value(char **ptr)
     // 就算value的长度超过了limit.over_value，我们也只加载存储在叶节点
     // 本身的数据，这并不影响修改操作，当真正需要完整的值时，可以通过
     // 调用load_real_value()来获得
-    value->over_page_off = decodeoff(ptr);
-    value->remain_off = decode16(ptr);
+    value->over_page_id = decode_page_id(ptr);
+    value->page_off = decode16(ptr);
     value->val = new std::string(*ptr, OVER_VALUE_LEN);
     *ptr += OVER_VALUE_LEN;
     return value;
@@ -344,8 +334,8 @@ value_t *translation_table::load_value(char **ptr)
 // 查找溢出页，取出完整的value
 void translation_table::load_real_value(value_t *value, std::string *saved_val)
 {
-    off_t off = value->over_page_off;
-    if (off == 0) {
+    page_id_t page_id = value->over_page_id;
+    if (page_id == 0) {
         assert(value->reallen <= limit.over_value);
         saved_val->assign(*value->val);
         return;
@@ -354,25 +344,25 @@ void translation_table::load_real_value(value_t *value, std::string *saved_val)
     assert(value->val->size() == OVER_VALUE_LEN);
     saved_val->assign(*value->val);
     while (true) {
-        void *start = mmap(nullptr, db->header.page_size, PROT_READ, MAP_SHARED, db->fd, off);
+        void *start = mmap(nullptr, db->header.page_size, PROT_READ, MAP_SHARED, db->fd, page_id);
         if (start == MAP_FAILED) {
-            panic("load_real_value: load page failed from off=%lld: %s", off, strerror(errno));
+            panic("load_real_value: load page failed from page_id=%lld: %s", page_id, strerror(errno));
         }
         char *buf = reinterpret_cast<char*>(start);
-        off = decodeoff(&buf);
+        page_id = decode_page_id(&buf);
         if (len >= CAP_OF_OVER_PAGE) {
             saved_val->append(buf, CAP_OF_OVER_PAGE);
             len -= CAP_OF_OVER_PAGE;
         } else {
             if (len <= CAP_OF_SHARED_OVER_PAGE) {
-                saved_val->append(buf - sizeof(off) + value->remain_off, len);
+                saved_val->append(buf - sizeof(page_id) + value->page_off, len);
             } else {
                 saved_val->append(buf, len);
             }
-            off = 0;
+            page_id = 0;
         }
         munmap(start, db->header.page_size);
-        if (off == 0) break;
+        if (page_id == 0) break;
     }
 }
 
@@ -381,22 +371,22 @@ void translation_table::free_value(value_t *value)
     int fd = db->get_db_fd();
     uint32_t len = value->reallen;
     if (len > limit.over_value) {
-        off_t off = value->over_page_off;
+        page_id_t page_id = value->over_page_id;
         len -= OVER_VALUE_LEN;
         while (true) {
-            off_t next_off;
-            lseek(fd, off, SEEK_SET);
-            read(fd, &next_off, sizeof(off_t));
+            page_id_t next_page_id;
+            lseek(fd, page_id, SEEK_SET);
+            read(fd, &next_page_id, sizeof(page_id_t));
             if (len >= CAP_OF_OVER_PAGE) {
-                db->page_manager.free_page(off);
+                db->page_manager.free_page(page_id);
                 len -= CAP_OF_OVER_PAGE;
-                if (next_off == 0) break;
-                off = next_off;
+                if (next_page_id == 0) break;
+                page_id = next_page_id;
             } else {
                 if (len <= CAP_OF_SHARED_OVER_PAGE)
-                    db->page_manager.free_over_page(off, value->remain_off, len);
+                    db->page_manager.free_over_page(page_id, value->page_off, len);
                 else
-                    db->page_manager.free_page(off);
+                    db->page_manager.free_page(page_id);
                 break;
             }
         }
@@ -405,20 +395,20 @@ void translation_table::free_value(value_t *value)
     delete value;
 }
 
-void translation_table::free_node(off_t off, node *node)
+void translation_table::free_node(page_id_t page_id, node *node)
 {
-    cache_list.erase(translation_to_node[off].pos);
-    translation_to_off.erase(node);
-    translation_to_node.erase(off);
-    db->page_manager.free_page(off);
+    cache_list.erase(translation_to_node[page_id].pos);
+    translation_to_page.erase(node);
+    translation_to_node.erase(page_id);
+    db->page_manager.free_page(page_id);
 }
 
 void translation_table::release_root(node *root)
 {
-    off_t off = to_off(root);
+    page_id_t page_id = to_page_id(root);
     wlock_t wlk(shmtx);
-    cache_list.erase(translation_to_node[off].pos);
-    translation_to_node[off].x.release();
-    translation_to_node.erase(off);
-    translation_to_off.erase(root);
+    cache_list.erase(translation_to_node[page_id].pos);
+    translation_to_node[page_id].x.release();
+    translation_to_node.erase(page_id);
+    translation_to_page.erase(root);
 }

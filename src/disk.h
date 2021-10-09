@@ -24,41 +24,41 @@ public:
 
     void init();
     void set_cache_cap(int cap) { lru_cap = std::max(128, cap); }
-    node *load_node(off_t off);
+    node *load_node(page_id_t page_id);
     void load_real_value(value_t *value, std::string *saved_val);
     void free_value(value_t *value);
     void release_root(node *root);
-    node *to_node(off_t off);
-    off_t to_off(node *node);
+    node *to_node(page_id_t page_id);
+    page_id_t to_page_id(node *node);
     // 向转换表中加入一个新的表项
-    void put(off_t off, node *node);
+    void put(page_id_t page_id, node *node);
     void flush();
 private:
     struct cache_node {
         std::unique_ptr<node> x;
-        std::list<off_t>::iterator pos;
+        std::list<page_id_t>::iterator pos;
         cache_node() : x(nullptr), pos() {  }
-        cache_node(node *x, std::list<off_t>::iterator pos) : x(std::unique_ptr<node>(x)), pos(pos) { }
+        cache_node(node *x, std::list<page_id_t>::iterator pos) : x(std::unique_ptr<node>(x)), pos(pos) { }
     };
 
-    node *lru_get(off_t off);
-    void lru_put(off_t off, node *node);
+    node *lru_get(page_id_t page_id);
+    void lru_put(page_id_t page_id, node *node);
 
     void fill_header(header_t *header, struct iovec *iov);
     void load_header();
     void save_header(header_t *header);
-    void save_node(off_t off, node *node);
+    void save_node(page_id_t page_id, node *node);
     void save_value(std::string& buf, value_t *value);
     value_t *load_value(char **ptr);
-    void free_node(off_t off, node *node);
+    void free_node(page_id_t page_id, node *node);
 
     void clear();
 
     DB *db;
     // 双向转换表 && LRU cache
-    std::unordered_map<off_t, cache_node> translation_to_node;
-    std::unordered_map<node*, off_t> translation_to_off;
-    std::list<off_t> cache_list;
+    std::unordered_map<page_id_t, cache_node> translation_to_node;
+    std::unordered_map<node*, page_id_t> translation_to_page;
+    std::list<page_id_t> cache_list;
     std::shared_mutex shmtx;
     int lru_cap;
 };
