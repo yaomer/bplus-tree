@@ -41,7 +41,7 @@ void translation_table::lru_put(off_t off, node *node)
         off_t evict_off = cache_list.back();
         auto *evict_node = translation_to_node[evict_off].x.get();
         if (evict_node->shmtx.try_lock()) {
-            if (!evict_node->dirty && !evict_node->maybe_using) {
+            if (!evict_node->deleted && !evict_node->dirty && !evict_node->maybe_using) {
                 translation_to_off.erase(evict_node);
                 translation_to_node.erase(evict_off);
                 cache_list.pop_back();
@@ -64,6 +64,7 @@ node *translation_table::to_node(off_t off)
         node = load_node(off);
         lru_put(off, node);
     }
+    if (node->deleted) return nullptr;
     node->maybe_using = true;
     return node;
 }
@@ -88,12 +89,20 @@ void translation_table::put(off_t off, node *node)
 void translation_table::flush()
 {
     wlock_t wlk(shmtx);
+    std::vector<node*> del_nodes;
     for (auto& [node, off] : translation_to_off) {
+        if (node->deleted) {
+            del_nodes.push_back(node);
+            continue;
+        }
         if (node->dirty) {
             save_node(off, node);
             node->dirty = false;
         }
         node->maybe_using = false;
+    }
+    for (auto node : del_nodes) {
+        free_node(translation_to_off[node], node);
     }
     // 就算什么也没做，我们也强制flush一次根节点
     // 以便重启后可以成功load根节点
@@ -396,10 +405,8 @@ void translation_table::free_value(value_t *value)
     delete value;
 }
 
-void translation_table::free_node(node *node)
+void translation_table::free_node(off_t off, node *node)
 {
-    off_t off = to_off(node);
-    wlock_t wlk(shmtx);
     cache_list.erase(translation_to_node[off].pos);
     translation_to_off.erase(node);
     translation_to_node.erase(off);

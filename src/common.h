@@ -100,9 +100,16 @@ struct node {
     }
     void update(bool dirty = true);
 
+    void free()
+    {
+        resize(0);
+        deleted = true;
+    }
+
     bool leaf;
     bool dirty = false;
     bool maybe_using = false;
+    bool deleted = false;
     std::vector<key_t> keys;
     std::vector<off_t> childs;
     std::vector<value_t*> values;

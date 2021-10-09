@@ -28,42 +28,40 @@ void logger::open_log_file()
 
 void logger::append(char type, const std::string *key, const std::string *value)
 {
-    uint8_t keylen;
-    uint32_t valuelen;
-    struct iovec iov[5];
-    iov[0].iov_base = &type;
-    iov[0].iov_len = sizeof(type);
-    switch (type) {
-    case LOG_TYPE_INSERT:
-        keylen = key->size();
-        iov[1].iov_base = &keylen;
-        iov[1].iov_len = sizeof(keylen);
-        iov[2].iov_base = const_cast<char*>(key->data());
-        iov[2].iov_len = keylen;
-        valuelen = value->size();
-        iov[3].iov_base = &valuelen;
-        iov[3].iov_len = sizeof(valuelen);
-        iov[4].iov_base = const_cast<char*>(value->data());
-        iov[4].iov_len = valuelen;
-        sync_log(iov, 5);
-        break;
-    case LOG_TYPE_ERASE:
-        keylen = key->size();
-        iov[1].iov_base = &keylen;
-        iov[1].iov_len = sizeof(keylen);
-        iov[2].iov_base = const_cast<char*>(key->data());
-        iov[2].iov_len = keylen;
-        sync_log(iov, 3);
-        break;
+    int cur_buf_size;
+    if (recovery) return;
+    {
+        lock_t lk(log_mtx);
+        write_buf.append(1, type);
+        encode8(write_buf, key->size());
+        write_buf.append(*key);
+        if (type == LOG_TYPE_INSERT) {
+            encode32(write_buf, value->size());
+            write_buf.append(*value);
+        }
+        cur_buf_size = write_buf.size();
+    }
+    if (db->ops.wal_sync == 0) {
+        log_cv.notify_one();
+    } else if (db->ops.wal_sync == 1) {
+        if (cur_buf_size >= db->ops.wal_sync_buffer_size) {
+            log_cv.notify_one();
+        }
     }
 }
 
-void logger::sync_log(struct iovec *iov, int len)
+void logger::sync_log_handler()
 {
-    lock_t lk(log_mtx);
-    if (!recovery) {
-        writev(log_fd, iov, len);
+    while (!quit_sync_logger) {
+        {
+            std::unique_lock<std::mutex> ulock(log_mtx);
+            log_cv.wait_for(ulock, std::chrono::seconds(db->ops.wal_wake_interval));
+            if (write_buf.empty()) continue;
+            write_buf.swap(flush_buf);
+        }
+        write(log_fd, flush_buf.data(), flush_buf.size());
         fsync(log_fd);
+        flush_buf.clear();
     }
 }
 
@@ -99,11 +97,15 @@ void logger::replay()
 
 void logger::check_point()
 {
-    cv.notify_one();
+    check_point_cv.notify_one();
 }
 
 void logger::quit_check_point()
 {
+    quit_sync_logger = true;
+    log_cv.notify_one();
+    if (sync_logger.joinable())
+        sync_logger.join();
     quit_cleaner = true;
     check_point();
     if (cleaner.joinable())
@@ -114,7 +116,7 @@ void logger::clean_handler()
 {
     while (!quit_cleaner) {
         std::unique_lock<std::mutex> ulock(check_point_mtx);
-        cv.wait_for(ulock, std::chrono::seconds(10));
+        check_point_cv.wait_for(ulock, std::chrono::seconds(db->ops.check_point_interval));
         db->is_check_point = true;
         while (db->sync_check_point > 0) ;
         db->translation_table.flush();

@@ -20,23 +20,30 @@ enum { LOG_TYPE_INSERT, LOG_TYPE_ERASE };
 
 class logger {
 public:
-    logger(DB *db) : db(db), quit_cleaner(false), cleaner([this]{ this->clean_handler(); }) {  }
+    logger(DB *db) : db(db),
+        quit_sync_logger(false), sync_logger([this]{ this->sync_log_handler(); }),
+        quit_cleaner(false), cleaner([this]{ this->clean_handler(); }) {  }
     void init();
     void append(char type, const std::string *key, const std::string *value = nullptr);
     void quit_check_point();
 private:
     void open_log_file();
-    void sync_log(struct iovec *iov, int len);
+    void sync_log_handler();
     void clean_handler();
     void replay();
     void check_point();
+
     DB *db;
     int log_fd;
     std::string log_file;
     bool recovery = false;
     std::mutex log_mtx;
+    std::condition_variable log_cv;
+    std::atomic_bool quit_sync_logger;
+    std::thread sync_logger;
+    std::string write_buf, flush_buf;
     std::mutex check_point_mtx;
-    std::condition_variable cv;
+    std::condition_variable check_point_cv;
     std::atomic_bool quit_cleaner;
     std::thread cleaner;
     // LSN(Log Sequence Number)

@@ -17,22 +17,33 @@ namespace bpdb {
 
 void panic(const char *fmt, ...);
 
+typedef std::function<bool(const key_t&, const key_t&)> Comparator;
+
+struct options {
+    int page_size = 1024 * 16;
+    int page_cache_slots = 1024;
+    // 0: sync every log
+    // 1: sync every `wal_sync_buffer_size`
+    int wal_sync = 1;
+    int wal_sync_buffer_size = 4096;
+    // 每隔多久(s)唤醒后台sync-logger线程
+    int wal_wake_interval = 1;
+    // 默认每10(s)做一次check-point
+    int check_point_interval = 10;
+    Comparator keycomp;
+};
+
 class DB {
 public:
-    DB() : dbname("testdb"), translation_table(this), page_manager(this), logger(this)
+    DB(const options& ops, const std::string& dbname)
+        : ops(ops), dbname(dbname), translation_table(this), page_manager(this), logger(this)
     {
-        init();
-    }
-    DB(const std::string& dbname)
-        : dbname(dbname), translation_table(this), page_manager(this), logger(this)
-    {
+        check_options();
         init();
     }
     ~DB() { logger.quit_check_point(); }
     DB(const DB&) = delete;
     DB& operator=(const DB&) = delete;
-
-    typedef std::function<bool(const key_t&, const key_t&)> Comparator;
 
     class iterator {
     public:
@@ -52,10 +63,6 @@ public:
         std::string saved_value;
     };
 
-    void set_key_comparator(Comparator comp);
-    void set_page_size(int page_size);
-    void set_page_cache_slots(int slots);
-
     iterator new_iterator() { return iterator(this); }
     bool find(const std::string& key, std::string *value);
     void insert(const std::string& key, const std::string& value);
@@ -63,6 +70,7 @@ public:
     void rebuild();
 private:
     void init();
+    void check_options();
     int open_db_file();
 
     bool is_main_thread() { return std::this_thread::get_id() == cur_tid; }
@@ -109,6 +117,7 @@ private:
     }
 
     int fd;
+    options ops;
     std::string dbname;
     std::string dbfile;
     std::thread::id cur_tid;

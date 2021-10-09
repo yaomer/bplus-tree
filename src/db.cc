@@ -23,12 +23,35 @@ void panic(const char *fmt, ...)
 }
 }
 
+void DB::check_options()
+{
+    static std::unordered_set<int> valid_pages = {
+        1024 * 4,
+        1024 * 8,
+        1024 * 16,
+        1024 * 32,
+        1024 * 64,
+    };
+    if (!valid_pages.count(ops.page_size)) {
+        panic("The optional value of `page_size` is (4K, 8K, 16K, 32K or 64K)");
+    }
+    header.page_size = ops.page_size;
+    translation_table.set_cache_cap(ops.page_cache_slots);
+    if (ops.keycomp) {
+        comparator = ops.keycomp;
+    } else {
+        comparator = [](const key_t& l, const key_t& r) {
+            return std::less<key_t>()(l, r);
+        };
+    }
+    if (ops.wal_sync != 0 && ops.wal_sync != 1) {
+        panic("The optional value of `wal_sync` is (0 or 1)");
+    }
+}
+
 void DB::init()
 {
     cur_tid = std::this_thread::get_id();
-    comparator = [](const key_t& l, const key_t& r) {
-        return std::less<key_t>()(l, r);
-    };
     if (dbname.empty()) panic("dbname is empty");
     if (dbname.back() != '/') dbname.push_back('/');
     mkdir(dbname.c_str(), 0777);
@@ -54,31 +77,6 @@ int DB::open_db_file()
         panic("open(%s): %s", dbfile.c_str(), strerror(errno));
     }
     return fd;
-}
-
-void DB::set_key_comparator(Comparator comp)
-{
-    comparator = comp;
-}
-
-void DB::set_page_size(int page_size)
-{
-    static std::unordered_set<int> valid_pages = {
-        1024 * 4,
-        1024 * 8,
-        1024 * 16,
-        1024 * 32,
-        1024 * 64,
-    };
-    if (!valid_pages.count(page_size)) {
-        panic("The optional value of `page_size` is (4K, 8K, 16K, 32K or 64K)");
-    }
-    header.page_size = page_size;
-}
-
-void DB::set_page_cache_slots(int slots)
-{
-    translation_table.set_cache_cap(slots);
 }
 
 namespace bpdb {
@@ -224,10 +222,11 @@ void DB::update_header_in_insert(node *x, const key_t& key)
     // T1: hold(header), require(leaf)
     // T2: hold(leaf), require(header)
     node *leaf = to_node(leaf_off);
-    if (leaf != x) leaf->lock_shared();
+    // 因为我们并没有持有leaf的父节点，所以它可能会被其他线程删除掉
+    if (leaf && leaf != x) leaf->lock_shared();
     lock_header();
-    if (less(key, leaf->keys[0])) header.leaf_off = to_off(x);
-    if (leaf != x) leaf->unlock_shared();
+    if (leaf && less(key, leaf->keys[0])) header.leaf_off = to_off(x);
+    if (leaf && leaf != x) leaf->unlock_shared();
     header.key_nums++;
     unlock_header();
 }
@@ -487,8 +486,7 @@ void DB::merge(node *y, node *x)
             r->unlock();
         }
     }
-    x->resize(0);
-    translation_table.free_node(x);
+    x->free();
     y->update();
 }
 
@@ -529,7 +527,7 @@ void DB::rebuild()
 {
     char tmpfile[] = "tmp.XXXXXX";
     mktemp(tmpfile);
-    DB *tmpdb = new DB(tmpfile);
+    DB *tmpdb = new DB(options(), tmpfile);
     auto it = new_iterator();
     for (it.seek_to_first(); it.valid(); it.next()) {
         tmpdb->insert(it.key(), it.value());
