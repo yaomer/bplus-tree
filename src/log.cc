@@ -7,12 +7,12 @@
 
 using namespace bpdb;
 
-void redo_log::init()
+void logger::init()
 {
     log_file = db->dbname + "redo.log";
     if ((log_fd = open(log_file.c_str(), O_RDWR | O_APPEND)) < 0) {
         if (errno != ENOENT) {
-            panic("redo_log: open(%s): %s", log_file.c_str(), strerror(errno));
+            panic("logger::init: open(%s): %s", log_file.c_str(), strerror(errno));
         }
         open_log_file();
     } else {
@@ -21,12 +21,12 @@ void redo_log::init()
     }
 }
 
-void redo_log::open_log_file()
+void logger::open_log_file()
 {
     log_fd = open(log_file.c_str(), O_RDWR | O_APPEND | O_CREAT, 0666);
 }
 
-void redo_log::append(char type, const std::string *key, const std::string *value)
+void logger::append(char type, const std::string *key, const std::string *value)
 {
     uint8_t keylen;
     uint32_t valuelen;
@@ -58,7 +58,7 @@ void redo_log::append(char type, const std::string *key, const std::string *valu
     }
 }
 
-void redo_log::sync_log(struct iovec *iov, int len)
+void logger::sync_log(struct iovec *iov, int len)
 {
     lock_t lk(log_mtx);
     if (!recovery) {
@@ -67,7 +67,7 @@ void redo_log::sync_log(struct iovec *iov, int len)
     }
 }
 
-void redo_log::replay()
+void logger::replay()
 {
     recovery = true;
     struct stat st;
@@ -97,12 +97,12 @@ void redo_log::replay()
     recovery = false;
 }
 
-void redo_log::check_point()
+void logger::check_point()
 {
     cv.notify_one();
 }
 
-void redo_log::quit_check_point()
+void logger::quit_check_point()
 {
     quit_cleaner = true;
     check_point();
@@ -110,7 +110,7 @@ void redo_log::quit_check_point()
         cleaner.join();
 }
 
-void redo_log::clean_handler()
+void logger::clean_handler()
 {
     while (!quit_cleaner) {
         std::unique_lock<std::mutex> ulock(check_point_mtx);

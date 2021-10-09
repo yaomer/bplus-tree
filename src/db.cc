@@ -44,7 +44,7 @@ void DB::init()
     } else {
         root.reset(translation_table.load_node(header.root_off));
     }
-    redo_log.init();
+    logger.init();
 }
 
 int DB::open_db_file()
@@ -152,7 +152,7 @@ void DB::insert(const std::string& key, const std::string& value)
     if (!check_limit(key, value)) return;
     wait_if_check_point();
     sync_check_point++;
-    redo_log.append(LOG_TYPE_INSERT, &key, &value);
+    logger.append(LOG_TYPE_INSERT, &key, &value);
     value_t *v = build_new_value(value);
     __lock_root();
     node *r = root.get();
@@ -333,7 +333,7 @@ void DB::erase(const key_t& key)
 {
     wait_if_check_point();
     sync_check_point++;
-    redo_log.append(LOG_TYPE_ERASE, &key);
+    logger.append(LOG_TYPE_ERASE, &key);
     __lock_root();
     erase(root.get(), key, nullptr);
     __lock_root();

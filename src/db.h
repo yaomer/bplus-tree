@@ -19,16 +19,16 @@ void panic(const char *fmt, ...);
 
 class DB {
 public:
-    DB() : dbname("testdb"), translation_table(this), page_manager(this), redo_log(this)
+    DB() : dbname("testdb"), translation_table(this), page_manager(this), logger(this)
     {
         init();
     }
     DB(const std::string& dbname)
-        : dbname(dbname), translation_table(this), page_manager(this), redo_log(this)
+        : dbname(dbname), translation_table(this), page_manager(this), logger(this)
     {
         init();
     }
-    ~DB() { redo_log.quit_check_point(); }
+    ~DB() { logger.quit_check_point(); }
     DB(const DB&) = delete;
     DB& operator=(const DB&) = delete;
 
@@ -126,11 +126,11 @@ private:
     std::shared_mutex root_shmtx;
     translation_table translation_table;
     page_manager page_manager;
-    redo_log redo_log;
+    logger logger;
     Comparator comparator;
     friend class translation_table;
     friend class page_manager;
-    friend class redo_log;
+    friend class logger;
 };
 }
 

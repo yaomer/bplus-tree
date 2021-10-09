@@ -18,9 +18,9 @@ class DB;
 
 enum { LOG_TYPE_INSERT, LOG_TYPE_ERASE };
 
-class redo_log {
+class logger {
 public:
-    redo_log(DB *db) : db(db), quit_cleaner(false), cleaner([this]{ this->clean_handler(); }) {  }
+    logger(DB *db) : db(db), quit_cleaner(false), cleaner([this]{ this->clean_handler(); }) {  }
     void init();
     void append(char type, const std::string *key, const std::string *value = nullptr);
     void quit_check_point();
