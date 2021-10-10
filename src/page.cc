@@ -42,7 +42,7 @@ void page_manager::clear()
 // 3) 一个value溢出的值不能占满整页，此时我们将管理所有这些未用完的页
 page_id_t page_manager::alloc_page()
 {
-    recursive_lock_t lk(db->header_mtx);
+    recursive_lock_t lk(db->header_latch);
     page_id_t page_id = db->header.free_list_head;
     if (db->header.free_pages > 0) {
         db->header.free_pages--;
@@ -64,7 +64,7 @@ page_id_t page_manager::alloc_page()
 void page_manager::free_page(page_id_t page_id)
 {
     ASSERT_PAGE_ID(page_id);
-    recursive_lock_t lk(db->header_mtx);
+    recursive_lock_t lk(db->header_latch);
     lseek(db->fd, page_id, SEEK_SET);
     write(db->fd, &db->header.free_list_head, sizeof(db->header.free_list_head));
     db->header.free_list_head = page_id;
@@ -95,7 +95,7 @@ over_page_id_t page_manager::write_over_page(const char *data, uint16_t n)
 {
     ASSERT_AVAIL(n);
     uint16_t round_n = round4(n); // n会被向上取整到4的倍数
-    lock_t lk(mtx);
+    lock_t lk(latch);
     auto it = avail_map.lower_bound(round_n);
     if (it == avail_map.end()) { // 没有找到剩余可用大小至少为round_n的页
         return write_new_over_page(data, n);
@@ -226,14 +226,14 @@ uint16_t page_manager::search_and_try_write(page_id_t page_id, const char *data,
 void page_manager::free_over_page(page_id_t page_id, uint16_t freep, uint16_t n)
 {
     ASSERT_PAGE_ID(page_id);
-    lock_t lk(mtx);
+    lock_t lk(latch);
     auto& over_page = over_page_map[page_id];
     ASSERT_AVAIL(over_page.avail + n);
     n = round4(n);
     over_page.avail += n;
     if (over_page.avail == db->header.page_size - OVER_PAGE_AVAIL_OFF) {
         // 如果该页没人使用了，就整个释放掉
-        recursive_lock_t lk(db->header_mtx);
+        recursive_lock_t lk(db->header_latch);
         if (over_page.prev_page_id > 0) {
             lseek(db->fd, over_page.prev_page_id, SEEK_SET);
             write(db->fd, &over_page.next_page_id, sizeof(over_page.next_page_id));

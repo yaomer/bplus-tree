@@ -60,6 +60,7 @@ public:
         DB *db;
         page_id_t page_id;
         int i;
+        std::string saved_key;
         std::string saved_value;
     };
 
@@ -77,8 +78,15 @@ private:
     int get_db_fd() { return is_main_thread() ? fd : open_db_file(); }
     void put_db_fd(int fd) { if (!is_main_thread()) close(fd); }
 
-    void lock_header() { header_mtx.lock(); }
-    void unlock_header() { header_mtx.unlock(); }
+    void lock_shared_root();
+    void lock_root();
+    void unlock_shared_root();
+    void unlock_root();
+    void unlock_shared(node *node);
+    void unlock(node *node);
+
+    void lock_header() { header_latch.lock(); }
+    void unlock_header() { header_latch.unlock(); }
 
     // 简单轮询以等待后台check_point()结束
     void wait_if_check_point() { if (is_check_point) while(is_check_point) ; }
@@ -128,11 +136,11 @@ private:
     std::atomic_bool is_check_point = false;
     header_t header;
     // 对header.page_size的并发访问是没有问题的，因为它不能在运行时更改
-    std::recursive_mutex header_mtx;
+    std::recursive_mutex header_latch;
     std::unique_ptr<node> root; // 根节点常驻内存
     // 保护根节点，因为root本身可能会被修改，所以我们不能直接使用root->lock()
     // 那样是不安全的
-    std::shared_mutex root_shmtx;
+    std::shared_mutex root_latch;
     translation_table translation_table;
     page_manager page_manager;
     logger logger;

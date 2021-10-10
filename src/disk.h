@@ -59,7 +59,7 @@ private:
     std::unordered_map<page_id_t, cache_node> translation_to_node;
     std::unordered_map<node*, page_id_t> translation_to_page;
     std::list<page_id_t> cache_list;
-    std::shared_mutex shmtx;
+    std::shared_mutex table_latch;
     int lru_cap;
 };
 }

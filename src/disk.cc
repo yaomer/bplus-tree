@@ -40,7 +40,7 @@ void translation_table::lru_put(page_id_t page_id, node *node)
     if (cache_list.size() >= lru_cap) {
         page_id_t evict_page_id = cache_list.back();
         auto *evict_node = translation_to_node[evict_page_id].x.get();
-        if (evict_node->shmtx.try_lock()) {
+        if (evict_node->latch.try_lock()) {
             if (!evict_node->deleted && !evict_node->dirty && !evict_node->maybe_using) {
                 translation_to_page.erase(evict_node);
                 translation_to_node.erase(evict_page_id);
@@ -58,7 +58,7 @@ void translation_table::lru_put(page_id_t page_id, node *node)
 node *translation_table::to_node(page_id_t page_id)
 {
     if (page_id == db->header.root_id) return db->root.get();
-    wlock_t wlk(shmtx);
+    wlock_t wlk(table_latch);
     node *node = lru_get(page_id);
     if (node == nullptr) {
         node = load_node(page_id);
@@ -72,7 +72,7 @@ node *translation_table::to_node(page_id_t page_id)
 page_id_t translation_table::to_page_id(node *node)
 {
     if (node == db->root.get()) return db->header.root_id;
-    rlock_t rlock(shmtx);
+    rlock_t rlock(table_latch);
     auto it = translation_to_page.find(node);
     if (it == translation_to_page.end()) {
         panic("to_page_id(%p)", node);
@@ -82,13 +82,13 @@ page_id_t translation_table::to_page_id(node *node)
 
 void translation_table::put(page_id_t page_id, node *node)
 {
-    wlock_t wlk(shmtx);
+    wlock_t wlk(table_latch);
     lru_put(page_id, node);
 }
 
 void translation_table::flush()
 {
-    wlock_t wlk(shmtx);
+    wlock_t wlk(table_latch);
     std::vector<node*> del_nodes;
     for (auto& [node, page_id] : translation_to_page) {
         if (node->deleted) {
@@ -406,7 +406,7 @@ void translation_table::free_node(page_id_t page_id, node *node)
 void translation_table::release_root(node *root)
 {
     page_id_t page_id = to_page_id(root);
-    wlock_t wlk(shmtx);
+    wlock_t wlk(table_latch);
     cache_list.erase(translation_to_node[page_id].pos);
     translation_to_node[page_id].x.release();
     translation_to_node.erase(page_id);

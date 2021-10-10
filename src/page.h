@@ -39,7 +39,7 @@ private:
     std::map<uint16_t, std::vector<page_id_t>> avail_map;
     // 1) 保护相应的内存数据结构
     // 2) 间接保证不会同时修改同一个shared-over-page
-    std::mutex mtx;
+    std::mutex latch;
 };
 }
 

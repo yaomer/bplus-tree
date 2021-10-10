@@ -63,10 +63,10 @@ struct node {
         }
     }
 
-    void lock_shared() { shmtx.lock_shared(); }
-    void unlock_shared() { shmtx.unlock_shared(); }
-    void lock() { shmtx.lock(); }
-    void unlock() { shmtx.unlock(); }
+    void lock_shared() { latch.lock_shared(); }
+    void unlock_shared() { latch.unlock_shared(); }
+    void lock() { latch.lock(); }
+    void unlock() { latch.unlock(); }
 
     void resize(int n)
     {
@@ -118,7 +118,7 @@ struct node {
     size_t page_used;
     page_id_t left = 0, right = 0;
     // 保护节点本身以及对应的磁盘页
-    std::shared_mutex shmtx;
+    std::shared_mutex latch;
 };
 
 typedef std::lock_guard<std::mutex> lock_t;
