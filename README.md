@@ -7,10 +7,11 @@ Usage
 
 void traveldb(bpdb::DB& db)
 {
-    auto it = db.new_iterator();
-    for (it.seek_to_first(); it.valid(); it.next()) {
-        std::cout << "(" << it.key().c_str() << ", " << it.value().c_str() << ")\n";
+    auto *it = db.new_iterator();
+    for (it->seek_to_first(); it->valid(); it->next()) {
+        std::cout << "(" << it->key().c_str() << ", " << it->value().c_str() << ")\n";
     }
+    delete it;
 }
 
 int main(int argc, char *argv[])

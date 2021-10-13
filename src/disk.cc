@@ -62,7 +62,6 @@ node *translation_table::to_node(page_id_t page_id)
         node = load_node(page_id);
         lru_put(page_id, node);
     }
-    if (node->deleted) return nullptr;
     node->maybe_using = true;
     return node;
 }

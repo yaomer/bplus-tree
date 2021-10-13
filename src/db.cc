@@ -96,6 +96,13 @@ void DB::wait_sync_point(bool sync_rw_point)
     if (sync_rw_point) while (sync_read_point > 0) ;
 }
 
+DB::iterator *DB::new_iterator()
+{
+    root_latch.lock_shared();
+    wait_sync_point(false);
+    return new iterator(this);
+}
+
 // 数据库中一般将保护对内存数据结构的并发访问的锁成为latch(闩锁)
 // 而将事务隔离相关的锁称为lock，保护的主要是数据库逻辑内容，通常锁定时间很长
 //
@@ -598,10 +605,11 @@ void DB::rebuild()
         wait_sync_point(true);
     }
     DB *tmpdb = new DB(options(), tmpname);
-    auto it = new_iterator();
-    for (it.seek_to_first(); it.valid(); it.next()) {
-        tmpdb->insert(it.key(), it.value());
+    auto *it = new_iterator();
+    for (it->seek_to_first(); it->valid(); it->next()) {
+        tmpdb->insert(it->key(), it->value());
     }
+    delete it;
     delete tmpdb;
     DIR *dirp = opendir(dbname.c_str());
     struct dirent *dp;

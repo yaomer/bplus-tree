@@ -48,6 +48,7 @@ public:
     class iterator {
     public:
         iterator(DB *db) : db(db), page_id(0), i(0) {  }
+        ~iterator() { db->root_latch.unlock_shared(); }
         bool valid();
         const std::string& key();
         const std::string& value();
@@ -60,11 +61,10 @@ public:
         DB *db;
         page_id_t page_id;
         int i;
-        std::string saved_key;
         std::string saved_value;
     };
 
-    iterator new_iterator() { return iterator(this); }
+    iterator *new_iterator();
     bool find(const std::string& key, std::string *value);
     void insert(const std::string& key, const std::string& value);
     void erase(const std::string& key);

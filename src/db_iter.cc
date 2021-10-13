@@ -10,32 +10,17 @@ bool DB::iterator::valid()
 const std::string& DB::iterator::key()
 {
     node *x = db->to_node(page_id);
-    if (x) {
-        rlock_t lk(x->latch);
-        if (!x->deleted) {
-            if (i == -1) i = x->keys.size() - 1;
-            saved_key = x->keys[i];
-            return saved_key;
-        }
-    }
-    page_id = 0;
-    saved_key.clear();
-    return saved_key;
+    if (i == -1) i = x->keys.size() - 1;
+    return x->keys[i];
 }
 
 const std::string& DB::iterator::value()
 {
     node *x = db->to_node(page_id);
-    if (x) {
-        rlock_t lk(x->latch);
-        if (!x->deleted) {
-            if (i == -1) i = x->keys.size() - 1;
-            db->translation_table.load_real_value(x->values[i], &saved_value);
-            return saved_value;
-        }
-    }
-    page_id = 0;
-    saved_value.clear();
+    if (i == -1) i = x->keys.size() - 1;
+    value_t *v = x->values[i];
+    if (v->reallen <= limit.over_value) return *v->val;
+    db->translation_table.load_real_value(v, &saved_value);
     return saved_value;
 }
 
@@ -57,7 +42,6 @@ DB::iterator& DB::iterator::seek(const std::string& key)
 DB::iterator& DB::iterator::seek_to_first()
 {
     if (db->header.key_nums > 0) {
-        recursive_lock_t lk(db->header_latch);
         page_id = db->header.leaf_id;
         i = 0;
     }
@@ -66,51 +50,29 @@ DB::iterator& DB::iterator::seek_to_first()
 
 DB::iterator& DB::iterator::seek_to_last()
 {
-    {
-        rlock_t rlk(db->root_latch);
-        db->root->lock_shared();
-    }
-    saved_key = db->root->keys.back();
-    db->root->unlock_shared();
-    return seek(saved_key);
+    return seek(db->root->keys.back());
 }
 
 DB::iterator& DB::iterator::next()
 {
-    if (page_id == 0) return *this;
     node *x = db->to_node(page_id);
-    if (x) {
-        rlock_t lk(x->latch);
-        if (!x->deleted) {
-            if (i == -1) i = x->keys.size() - 1;
-            if (i + 1 < x->keys.size()) i++;
-            else {
-                page_id = x->right;
-                i = 0;
-            }
-            return *this;
-        }
+    if (i == -1) i = x->keys.size() - 1;
+    if (i + 1 < x->keys.size()) i++;
+    else {
+        page_id = x->right;
+        i = 0;
     }
-    page_id = 0;
     return *this;
 }
 
 DB::iterator& DB::iterator::prev()
 {
-    if (page_id == 0) return *this;
     node *x = db->to_node(page_id);
-    if (x) {
-        rlock_t lk(x->latch);
-        if (!x->deleted) {
-            if (i == -1) i = x->keys.size() - 1;
-            if (i - 1 >= 0) i--;
-            else {
-                page_id = x->left;
-                i = -1;
-            }
-            return *this;
-        }
+    if (i == -1) i = x->keys.size() - 1;
+    if (i - 1 >= 0) i--;
+    else {
+        page_id = x->left;
+        i = -1;
     }
-    page_id = 0;
     return *this;
 }
