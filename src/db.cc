@@ -79,6 +79,19 @@ int DB::open_db_file()
     return fd;
 }
 
+void DB::wait_if()
+{
+    // 简单轮询以等待后台check_point()结束
+    if (is_check_point) while(is_check_point) ;
+    // 等待rebuild结束
+    if (is_rebuild) while (is_rebuild) ;
+}
+
+void DB::wait_sync_point()
+{
+    while (sync_check_point > 0) ;
+}
+
 // 数据库中一般将保护对内存数据结构的并发访问的锁成为latch(闩锁)
 // 而将事务隔离相关的锁称为lock，保护的主要是数据库逻辑内容，通常锁定时间很长
 //
@@ -144,7 +157,7 @@ namespace bpdb {
 void DB::insert(const std::string& key, const std::string& value)
 {
     if (!check_limit(key, value)) return;
-    wait_if_check_point();
+    wait_if();
     sync_check_point++;
     logger.append(LOG_TYPE_INSERT, &key, &value);
     value_t *v = build_new_value(value);
@@ -359,7 +372,7 @@ void DB::link_leaf(node *z, node *y, int type)
 
 void DB::erase(const key_t& key)
 {
-    wait_if_check_point();
+    wait_if();
     sync_check_point++;
     logger.append(LOG_TYPE_ERASE, &key);
     {
@@ -560,16 +573,28 @@ bool DB::check_limit(const std::string& key, const std::string& value)
     return true;
 }
 
+#include <dirent.h>
+
 void DB::rebuild()
 {
-    char tmpfile[] = "tmp.XXXXXX";
-    mktemp(tmpfile);
-    DB *tmpdb = new DB(options(), tmpfile);
+    char tmpname[] = "tmp.XXXXXX";
+    mktemp(tmpname);
+    is_rebuild = true;
+    wait_sync_point();
+    DB *tmpdb = new DB(options(), tmpname);
     auto it = new_iterator();
     for (it.seek_to_first(); it.valid(); it.next()) {
         tmpdb->insert(it.key(), it.value());
     }
     delete tmpdb;
-    rename(tmpfile, dbfile.c_str());
+    DIR *dirp = opendir(dbname.c_str());
+    struct dirent *dp;
+    while ((dp = readdir(dirp))) {
+        auto rf = dbname + dp->d_name;
+        unlink(rf.c_str());
+    }
+    rmdir(dbname.c_str());
+    rename(tmpname, dbname.c_str());
     init();
+    is_rebuild = false;
 }

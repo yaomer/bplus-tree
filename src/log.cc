@@ -118,7 +118,7 @@ void logger::clean_handler()
         std::unique_lock<std::mutex> ulock(check_point_mtx);
         check_point_cv.wait_for(ulock, std::chrono::seconds(db->ops.check_point_interval));
         db->is_check_point = true;
-        while (db->sync_check_point > 0) ;
+        db->wait_sync_point();
         db->translation_table.flush();
         unlink(log_file.c_str());
         close(log_fd);

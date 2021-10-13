@@ -74,15 +74,15 @@ private:
     void check_options();
     int open_db_file();
 
+    void wait_if();
+    void wait_sync_point();
+
     bool is_main_thread() { return std::this_thread::get_id() == cur_tid; }
     int get_db_fd() { return is_main_thread() ? fd : open_db_file(); }
     void put_db_fd(int fd) { if (!is_main_thread()) close(fd); }
 
     void lock_header() { header_latch.lock(); }
     void unlock_header() { header_latch.unlock(); }
-
-    // 简单轮询以等待后台check_point()结束
-    void wait_if_check_point() { if (is_check_point) while(is_check_point) ; }
 
     node *to_node(page_id_t page_id) { return translation_table.to_node(page_id); }
     page_id_t to_page_id(node *node) { return translation_table.to_page_id(node); }
@@ -127,6 +127,7 @@ private:
     std::atomic_int sync_check_point = 0;
     // 正在进行check_point()，写操作将暂时阻塞
     std::atomic_bool is_check_point = false;
+    std::atomic_bool is_rebuild = false;
     header_t header;
     // 对header.page_size的并发访问是没有问题的，因为它不能在运行时更改
     std::recursive_mutex header_latch;
