@@ -80,18 +80,20 @@ page_id_t translation_table::to_page_id(node *node)
 
 void translation_table::flush()
 {
-    wlock_t wlk(table_latch);
     std::vector<node*> del_nodes;
-    for (auto& [node, page_id] : translation_to_page) {
-        if (node->deleted) {
-            del_nodes.push_back(node);
-            continue;
+    {
+        rlock_t rlk(table_latch);
+        for (auto& [node, page_id] : translation_to_page) {
+            if (node->deleted) {
+                del_nodes.push_back(node);
+                continue;
+            }
+            if (node->dirty) {
+                save_node(page_id, node);
+                node->dirty = false;
+            }
+            node->maybe_using = false;
         }
-        if (node->dirty) {
-            save_node(page_id, node);
-            node->dirty = false;
-        }
-        node->maybe_using = false;
     }
     for (auto node : del_nodes) {
         free_node(translation_to_page[node], node);

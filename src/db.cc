@@ -79,17 +79,21 @@ int DB::open_db_file()
     return fd;
 }
 
-void DB::wait_if()
+void DB::wait_if_check_point()
 {
     // 简单轮询以等待后台check_point()结束
     if (is_check_point) while(is_check_point) ;
-    // 等待rebuild结束
+}
+
+void DB::wait_if_rebuild()
+{
     if (is_rebuild) while (is_rebuild) ;
 }
 
-void DB::wait_sync_point()
+void DB::wait_sync_point(bool sync_rw_point)
 {
     while (sync_check_point > 0) ;
+    if (sync_rw_point) while (sync_read_point > 0) ;
 }
 
 // 数据库中一般将保护对内存数据结构的并发访问的锁成为latch(闩锁)
@@ -107,16 +111,20 @@ void DB::wait_sync_point()
 
 bool DB::find(const std::string& key, std::string *value)
 {
+    wait_if_rebuild();
     {
         rlock_t rlk(root_latch);
         root->lock_shared();
     }
+    sync_read_point++;
     auto [x, i] = find(root.get(), key);
     if (x) {
         translation_table.load_real_value(x->values[i], value);
         x->unlock_shared();
+        sync_read_point--;
         return true;
     }
+    sync_read_point--;
     return false;
 }
 
@@ -157,16 +165,17 @@ namespace bpdb {
 void DB::insert(const std::string& key, const std::string& value)
 {
     if (!check_limit(key, value)) return;
-    wait_if();
-    sync_check_point++;
+    wait_if_check_point();
+    wait_if_rebuild();
     logger.append(LOG_TYPE_INSERT, &key, &value);
     value_t *v = build_new_value(value);
 retry_insert:
-    retry = false;
     {
         wlock_t wlk(root_latch);
         root->lock();
     }
+    if (!retry) sync_check_point++;
+    retry = false;
     node *r = root.get();
     if (isfull(r, key, v)) {
         root->unlock();
@@ -372,13 +381,14 @@ void DB::link_leaf(node *z, node *y, int type)
 
 void DB::erase(const key_t& key)
 {
-    wait_if();
-    sync_check_point++;
+    wait_if_check_point();
+    wait_if_rebuild();
     logger.append(LOG_TYPE_ERASE, &key);
     {
         wlock_t wlk(root_latch);
         root->lock();
     }
+    sync_check_point++;
     erase(root.get(), key, nullptr);
     {
         rlock_t rlk(root_latch);
@@ -579,8 +589,14 @@ void DB::rebuild()
 {
     char tmpname[] = "tmp.XXXXXX";
     mktemp(tmpname);
-    is_rebuild = true;
-    wait_sync_point();
+    {
+        wlock_t wlk(root_latch);
+        if (is_rebuild) return;
+        logger.check_point();
+        wait_if_check_point();
+        is_rebuild = true;
+        wait_sync_point(true);
+    }
     DB *tmpdb = new DB(options(), tmpname);
     auto it = new_iterator();
     for (it.seek_to_first(); it.valid(); it.next()) {

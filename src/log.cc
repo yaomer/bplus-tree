@@ -97,7 +97,9 @@ void logger::replay()
 
 void logger::check_point()
 {
+    log_cv.notify_one();
     check_point_cv.notify_one();
+    db->is_check_point = true;
 }
 
 void logger::quit_check_point()
@@ -118,7 +120,11 @@ void logger::clean_handler()
         std::unique_lock<std::mutex> ulock(check_point_mtx);
         check_point_cv.wait_for(ulock, std::chrono::seconds(db->ops.check_point_interval));
         db->is_check_point = true;
-        db->wait_sync_point();
+        if (db->is_rebuild) {
+            db->is_check_point = false;
+            continue;
+        }
+        db->wait_sync_point(false);
         db->translation_table.flush();
         unlink(log_file.c_str());
         close(log_fd);

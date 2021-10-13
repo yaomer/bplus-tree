@@ -74,8 +74,9 @@ private:
     void check_options();
     int open_db_file();
 
-    void wait_if();
-    void wait_sync_point();
+    void wait_if_check_point();
+    void wait_if_rebuild();
+    void wait_sync_point(bool sync_rw_point);
 
     bool is_main_thread() { return std::this_thread::get_id() == cur_tid; }
     int get_db_fd() { return is_main_thread() ? fd : open_db_file(); }
@@ -125,6 +126,7 @@ private:
     // 每个线程执行修改操作时先递增sync_check_point，修改完成后再递减
     // 我们在做check_point()之前要保证sync_check_point=0，以保证刷脏页时数据库状态的一致性
     std::atomic_int sync_check_point = 0;
+    std::atomic_int sync_read_point = 0;
     // 正在进行check_point()，写操作将暂时阻塞
     std::atomic_bool is_check_point = false;
     std::atomic_bool is_rebuild = false;
