@@ -41,12 +41,15 @@ const std::string& DB::iterator::value()
 
 DB::iterator& DB::iterator::seek(const std::string& key)
 {
-    db->lock_shared_root();
+    {
+        rlock_t rlk(db->root_latch);
+        db->root->lock_shared();
+    }
     auto [node, pos] = db->find(db->root.get(), key);
     if (node) {
         page_id = db->to_page_id(node);
         i = pos;
-        db->unlock_shared(node);
+        node->unlock_shared();
     }
     return *this;
 }
@@ -63,9 +66,12 @@ DB::iterator& DB::iterator::seek_to_first()
 
 DB::iterator& DB::iterator::seek_to_last()
 {
-    db->lock_shared_root();
+    {
+        rlock_t rlk(db->root_latch);
+        db->root->lock_shared();
+    }
     saved_key = db->root->keys.back();
-    db->unlock_shared_root();
+    db->root->unlock_shared();
     return seek(saved_key);
 }
 

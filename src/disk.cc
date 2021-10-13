@@ -21,6 +21,7 @@ void translation_table::clear()
 
 node *translation_table::lru_get(page_id_t page_id)
 {
+    wlock_t wlk(table_latch);
     auto it = translation_to_node.find(page_id);
     if (it == translation_to_node.end()) return nullptr;
     if (it->second.pos != cache_list.begin()) {
@@ -31,12 +32,10 @@ node *translation_table::lru_get(page_id_t page_id)
     return it->second.x.get();
 }
 
-// 放入的<page_id, node>一定是原先不存在的
 void translation_table::lru_put(page_id_t page_id, node *node)
 {
-    if (translation_to_node.count(page_id)) {
-        panic("lru_put: page_id=%lld exists", page_id);
-    }
+    wlock_t wlk(table_latch);
+    if (translation_to_node.count(page_id)) return;
     if (cache_list.size() >= lru_cap) {
         page_id_t evict_page_id = cache_list.back();
         auto *evict_node = translation_to_node[evict_page_id].x.get();
@@ -58,7 +57,6 @@ void translation_table::lru_put(page_id_t page_id, node *node)
 node *translation_table::to_node(page_id_t page_id)
 {
     if (page_id == db->header.root_id) return db->root.get();
-    wlock_t wlk(table_latch);
     node *node = lru_get(page_id);
     if (node == nullptr) {
         node = load_node(page_id);
@@ -78,12 +76,6 @@ page_id_t translation_table::to_page_id(node *node)
         panic("to_page_id(%p)", node);
     }
     return it->second;
-}
-
-void translation_table::put(page_id_t page_id, node *node)
-{
-    wlock_t wlk(table_latch);
-    lru_put(page_id, node);
 }
 
 void translation_table::flush()

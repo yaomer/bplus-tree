@@ -78,13 +78,6 @@ private:
     int get_db_fd() { return is_main_thread() ? fd : open_db_file(); }
     void put_db_fd(int fd) { if (!is_main_thread()) close(fd); }
 
-    void lock_shared_root();
-    void lock_root();
-    void unlock_shared_root();
-    void unlock_root();
-    void unlock_shared(node *node);
-    void unlock(node *node);
-
     void lock_header() { header_latch.lock(); }
     void unlock_header() { header_latch.unlock(); }
 
@@ -104,7 +97,7 @@ private:
 
     bool isfull(node *x, const key_t& key, value_t *value);
     void split(node *x, int i, const key_t& key);
-    node *split(node *x, int type);
+    node *split(node *y, int type);
     enum { RIGHT_INSERT_SPLIT, LEFT_INSERT_SPLIT, MID_SPLIT };
     int get_split_type(node *x, const key_t& key);
     void link_leaf(node *z, node *y, int type);

@@ -31,7 +31,7 @@ public:
     node *to_node(page_id_t page_id);
     page_id_t to_page_id(node *node);
     // 向转换表中加入一个新的表项
-    void put(page_id_t page_id, node *node);
+    void put(page_id_t page_id, node *node) { lru_put(page_id, node); }
     void flush();
 private:
     struct cache_node {

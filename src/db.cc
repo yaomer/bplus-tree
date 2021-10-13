@@ -92,60 +92,16 @@ int DB::open_db_file()
 // 考虑到两个冲突的线程可能会同时重试的情况，我们规定冲突时反向的线程进行重试，
 // 这样可以保证冲突时只有一个线程会重试，另一个线程会继续执行。
 
-namespace bpdb {
-    thread_local bool hold_root_latch = false; // 是否持有root_latch
-    thread_local bool lock_conflict_retry = false;
-}
-
-void DB::lock_shared_root()
-{
-    root_latch.lock_shared();
-    hold_root_latch = true;
-}
-
-void DB::lock_root()
-{
-    root_latch.lock();
-    hold_root_latch = true;
-}
-
-void DB::unlock_shared_root()
-{
-    root_latch.unlock_shared();
-    hold_root_latch = false;
-}
-
-void DB::unlock_root()
-{
-    root_latch.unlock();
-    hold_root_latch = false;
-}
-
-void DB::unlock_shared(node *node)
-{
-    if (hold_root_latch) {
-        unlock_shared_root();
-    } else {
-        node->unlock_shared();
-    }
-}
-
-void DB::unlock(node *node)
-{
-    if (hold_root_latch) {
-        unlock_root();
-    } else {
-        node->unlock();
-    }
-}
-
 bool DB::find(const std::string& key, std::string *value)
 {
-    lock_shared_root();
+    {
+        rlock_t rlk(root_latch);
+        root->lock_shared();
+    }
     auto [x, i] = find(root.get(), key);
     if (x) {
         translation_table.load_real_value(x->values[i], value);
-        unlock_shared(x);
+        x->unlock_shared();
         return true;
     }
     return false;
@@ -162,10 +118,10 @@ std::pair<node*, int> DB::find(node *x, const key_t& key)
     }
     child = to_node(x->childs[i]);
     child->lock_shared();
-    unlock_shared(x);
+    x->unlock_shared();
     return find(child, key);
 not_found:
-    unlock_shared(x);
+    x->unlock_shared();
     return { nullptr, 0 };
 }
 
@@ -181,6 +137,10 @@ value_t *DB::build_new_value(const std::string& value)
     return v;
 }
 
+namespace bpdb {
+    thread_local bool retry = false;
+}
+
 void DB::insert(const std::string& key, const std::string& value)
 {
     if (!check_limit(key, value)) return;
@@ -188,20 +148,34 @@ void DB::insert(const std::string& key, const std::string& value)
     sync_check_point++;
     logger.append(LOG_TYPE_INSERT, &key, &value);
     value_t *v = build_new_value(value);
-    lock_root();
+retry_insert:
+    retry = false;
+    {
+        wlock_t wlk(root_latch);
+        root->lock();
+    }
     node *r = root.get();
     if (isfull(r, key, v)) {
+        root->unlock();
+        // 在修改root的过程中，我们需要一直持有root_latch
+        root_latch.lock();
+        root->lock();
+        root->unlock();
         root.release();
         root.reset(new node(false));
         root->resize(1);
+        root->lock();
+        root_latch.unlock();
         lock_header();
         root->childs[0] = header.root_id;
         translation_table.put(header.root_id, r);
         header.root_id = page_manager.alloc_page();
         unlock_header();
         split(root.get(), 0, key);
+        if (retry) goto retry_insert;
     }
     insert(root.get(), key, v);
+    if (retry) goto retry_insert;
     sync_check_point--;
 }
 
@@ -223,9 +197,10 @@ void DB::insert(node *x, const key_t& key, value_t *value)
             update_header_in_insert(x, key);
         }
         x->update();
-        unlock(x);
+        x->unlock();
     } else {
         if (i == n) {
+            // 更新索引节点的右边界
             x->keys[--i] = key;
             x->update();
         }
@@ -239,13 +214,15 @@ void DB::insert(node *x, const key_t& key, value_t *value)
         child->lock();
         if (isfull(child, key, value)) {
             split(x, i, key);
+            if (retry) return;
             if (less(x->keys[i], key)) {
+                // key被挪到了childs[i+1]中
                 child->unlock();
                 child = to_node(x->childs[++i]);
                 child->lock();
             }
         }
-        unlock(x);
+        x->unlock();
         insert(child, key, value);
     }
 }
@@ -260,10 +237,10 @@ void DB::update_header_in_insert(node *x, const key_t& key)
     // T2: hold(leaf), require(header)
     node *leaf = to_node(leaf_id);
     // 因为我们并没有持有leaf的父节点，所以它可能会被其他线程删除掉
-    if (leaf && leaf != x) leaf->lock_shared();
+    if (!leaf->deleted && leaf != x) leaf->lock_shared();
     lock_header();
-    if (leaf && !leaf->deleted && less(key, leaf->keys[0])) header.leaf_id = to_page_id(x);
-    if (leaf && leaf != x) leaf->unlock_shared();
+    if (!leaf->deleted && less(key, leaf->keys[0])) header.leaf_id = to_page_id(x);
+    if (!leaf->deleted && leaf != x) leaf->unlock_shared();
     header.key_nums++;
     unlock_header();
 }
@@ -273,6 +250,11 @@ void DB::split(node *x, int i, const key_t& key)
     node *y = to_node(x->childs[i]);
     int type = get_split_type(y, key);
     node *z = split(y, type);
+    if (retry) {
+        x->unlock();
+        y->unlock();
+        return;
+    }
     int n = x->keys.size();
     x->resize(++n);
     for (int j = n - 1; j > i; j--) {
@@ -288,27 +270,27 @@ void DB::split(node *x, int i, const key_t& key)
     x->childs[i + 1] = to_page_id(z);
     if (type == LEFT_INSERT_SPLIT)
         std::swap(x->childs[i], x->childs[i + 1]);
-    if (z->leaf)
-        link_leaf(z, y, type);
     x->update();
 }
 
-node *DB::split(node *x, int type)
+node *DB::split(node *y, int type)
 {
-    node *y = new node(x->leaf);
-    translation_table.put(page_manager.alloc_page(), y);
+    node *z = new node(y->leaf);
+    if (z->leaf) link_leaf(z, y, type);
+    else translation_table.put(page_manager.alloc_page(), z);
+    if (retry) return nullptr;
     if (type == MID_SPLIT) {
-        int n = x->keys.size();
+        int n = y->keys.size();
         int point = ceil(n / 2.0);
-        y->resize(n - point);
+        z->resize(n - point);
         for (int i = point; i < n; i++) {
-            y->copy(i - point, x, i);
-            if (!x->leaf) y->childs[i - point] = x->childs[i];
+            z->copy(i - point, y, i);
+            if (!y->leaf) z->childs[i - point] = y->childs[i];
         }
-        x->remove_from(point);
-        y->update();
+        y->remove_from(point);
+        z->update();
     }
-    return y;
+    return z;
 }
 
 // 节点分裂默认是从中间分裂
@@ -338,31 +320,41 @@ int DB::get_split_type(node *x, const key_t& key)
 
 void DB::link_leaf(node *z, node *y, int type)
 {
+    page_id_t z_page_id;
     if (type == LEFT_INSERT_SPLIT) { // [z y]
         z->right = to_page_id(y);
         z->left = y->left;
         if (y->left > 0) {
             node *r = to_node(y->left);
-            r->lock();
-            r->right = to_page_id(z);
+            if (!r->latch.try_lock()) {
+                delete z;
+                retry = true;
+                return;
+            }
+            z_page_id = page_manager.alloc_page();
+            r->right = z_page_id;
             r->dirty = true;
             r->unlock();
+        } else {
+            z_page_id = page_manager.alloc_page();
         }
-        y->left = to_page_id(z);
+        y->left = z_page_id;
     } else { // [y z]
+        z_page_id = page_manager.alloc_page();
         z->left = to_page_id(y);
         z->right = y->right;
         if (y->right > 0) {
             node *r = to_node(y->right);
             r->lock();
-            r->left = to_page_id(z);
+            r->left = z_page_id;
             r->dirty = true;
             r->unlock();
         }
-        y->right = to_page_id(z);
+        y->right = z_page_id;
     }
     z->dirty = true;
     y->dirty = true;
+    translation_table.put(z_page_id, z);
 }
 
 void DB::erase(const key_t& key)
@@ -370,23 +362,31 @@ void DB::erase(const key_t& key)
     wait_if_check_point();
     sync_check_point++;
     logger.append(LOG_TYPE_ERASE, &key);
-    lock_root();
+    {
+        wlock_t wlk(root_latch);
+        root->lock();
+    }
     erase(root.get(), key, nullptr);
-    lock_root();
+    {
+        rlock_t rlk(root_latch);
+        root->lock_shared();
+    }
     if (!root->leaf && root->keys.size() == 1) {
+        root->unlock_shared();
+        root_latch.lock();
+        root->lock();
+        root->unlock();
         page_id_t page_id = root->childs[0];
         node *r = to_node(page_id);
-        r->lock_shared();
         translation_table.release_root(r);
-        r->unlock_shared();
         root.reset(r);
-        unlock_root();
+        root_latch.unlock();
         lock_header();
         page_manager.free_page(header.root_id);
         header.root_id = page_id;
         unlock_header();
     } else {
-        unlock_root();
+        root->unlock_shared();
     }
     sync_check_point--;
 }
@@ -395,7 +395,7 @@ void DB::erase(node *r, const key_t& key, node *precursor)
 {
     int i = search(r, key);
     int n = r->keys.size();
-    if (i == n) { unlock(r); return; }
+    if (i == n) { r->unlock(); return; }
     if (r->leaf) {
         if (i < n && equal(r->keys[i], key)) {
             translation_table.free_value(r->values[i]);
@@ -405,7 +405,7 @@ void DB::erase(node *r, const key_t& key, node *precursor)
             unlock_header();
         }
         if (precursor && precursor != r) precursor->unlock();
-        unlock(r);
+        r->unlock();
         return;
     }
     node *x = to_node(r->childs[i]);
@@ -420,7 +420,7 @@ void DB::erase(node *r, const key_t& key, node *precursor)
     }
     size_t t = header.page_size / 2;
     if (x->page_used >= t) {
-        unlock(r);
+        r->unlock();
         erase(x, key, precursor);
         return;
     }
@@ -431,13 +431,13 @@ void DB::erase(node *r, const key_t& key, node *precursor)
     if (y && y->page_used >= t) {
         if (z && z != precursor) z->unlock();
         borrow_from_left(r, x, y, i - 1);
-        unlock(r);
+        r->unlock();
         if (y != precursor) y->unlock();
         erase(x, key, precursor);
     } else if (z && z->page_used >= t) {
         if (y && y != precursor) y->unlock();
         borrow_from_right(r, x, z, i);
-        unlock(r);
+        r->unlock();
         if (z != precursor) z->unlock();
         erase(x, key, precursor);
     } else {
@@ -447,14 +447,14 @@ void DB::erase(node *r, const key_t& key, node *precursor)
             r->remove(i - 1);
             r->childs[i - 1] = page_id;
             merge(y, x);
-            unlock(r);
+            r->unlock();
             erase(y, key, precursor);
         } else {
             page_id_t page_id = r->childs[i];
             r->remove(i);
             r->childs[i] = page_id;
             merge(x, z);
-            unlock(r);
+            r->unlock();
             erase(x, key, precursor);
         }
     }
