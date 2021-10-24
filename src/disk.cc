@@ -161,7 +161,7 @@ void node::update(bool dirty)
     for (auto& key : keys) page_used += limit.key_len_field + key.size();
     if (leaf) {
         for (auto& value : values)  {
-            page_used += limit.value_len_field + std::min(limit.over_value, (size_t)value->reallen);
+            page_used += limit.value_len_field + sizeof(trx_id_t) + std::min(limit.over_value, (size_t)value->reallen);
         }
         page_used += sizeof(page_id_t) * 2;
     } else {
@@ -201,28 +201,35 @@ void translation_table::save_node(page_id_t page_id, node *node)
 
 #define OVER_VALUE_LEN (limit.over_value - sizeof(page_id_t) - 2)
 
+// if value->reallen <= limit.over_value
+// +----------------------------------------+
+// |  4 bytes  | 8 bytes | limit.over_value |
+// | value-len | trx-id  |       value      |
+// +----------------------------------------+
+// else:
+// +-----------------------------------------------------------------------+
+// |  4 bytes  | 8 bytes |   8 bytes    | 2 bytes  | limit.over_value - 10 |
+// | value-len | trx-id  | over-page-id | page-off |        value          |
+// +-----------------------------------------------------------------------+
+// over-page: [next-over-page-id][data]
 void translation_table::save_value(std::string& buf, value_t *value)
 {
     uint32_t len = value->reallen;
     encode32(buf, len);
+    encode64(buf, value->trx_id);
     if (len <= limit.over_value) {
         buf.append(*value->val);
         return;
     }
-    // over-value:
-    // --------------------------------------------------------------
-    // |  4 bytes  |   8 bytes    | 2 bytes  | limit.over_value - 10 |
-    // | value-len | over-page-id | page-off |        value          |
-    // --------------------------------------------------------------
-    // over-page: [next-over-page-id][data]
-    size_t pos = OVER_VALUE_LEN;
     // 我们只需将存储到叶节点本身的部分数据写入磁盘即可
     if (value->over_page_id > 0) {
         encode_page_id(buf, value->over_page_id);
         encode16(buf, value->page_off);
-        buf.append(value->val->data(), pos);
+        assert(value->val->size() == OVER_VALUE_LEN);
+        buf.append(*value->val);
         return;
     }
+    size_t pos = OVER_VALUE_LEN;
     // ##初次插入新value的情况
     // 对于剩下的存储到溢出页的数据，我们将根据页大小进行分块
     len -= pos;
@@ -265,9 +272,8 @@ void translation_table::save_value(std::string& buf, value_t *value)
     }
     encode_page_id(buf, value->over_page_id);
     encode16(buf, value->page_off);
-    // 这里的value->val只是指向用户传入进来的value的指针，并不持有它
-    // 插入后我们只需保留存储在叶节点本身的前面部分值即可
-    value->val = new std::string(value->val->data(), OVER_VALUE_LEN);
+    // 移除保存在溢出页中的数据
+    value->val->erase(OVER_VALUE_LEN);
     buf.append(*value->val);
 }
 
@@ -309,6 +315,7 @@ value_t *translation_table::load_value(char **ptr)
 {
     value_t *value = new value_t();
     value->reallen = decode32(ptr);
+    value->trx_id = decode64(ptr);
     if (value->reallen <= limit.over_value) {
         value->val = new std::string(*ptr, value->reallen);
         *ptr += value->reallen;
@@ -329,7 +336,7 @@ void translation_table::load_real_value(value_t *value, std::string *saved_val)
 {
     page_id_t page_id = value->over_page_id;
     if (page_id == 0) {
-        assert(value->reallen <= limit.over_value);
+        // 对于还未落盘的数据，value->reallen可能大于limit.over_value
         saved_val->assign(*value->val);
         return;
     }
@@ -363,7 +370,8 @@ void translation_table::free_value(value_t *value)
 {
     int fd = db->get_db_fd();
     uint32_t len = value->reallen;
-    if (len > limit.over_value) {
+    // 必须是已落盘的数据
+    if (value->over_page_id > 0 && len > limit.over_value) {
         page_id_t page_id = value->over_page_id;
         len -= OVER_VALUE_LEN;
         while (true) {

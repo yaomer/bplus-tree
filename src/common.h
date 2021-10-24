@@ -3,6 +3,7 @@
 
 #include <string>
 #include <vector>
+#include <mutex>
 #include <shared_mutex>
 
 #include <limits.h>
@@ -12,6 +13,7 @@ namespace bpdb {
 typedef std::string key_t;
 
 typedef off_t page_id_t;
+typedef uint64_t trx_id_t;
 
 struct value_t {
     ~value_t() { delete val; }
@@ -19,6 +21,7 @@ struct value_t {
     uint16_t page_off = 0;
     uint32_t reallen;
     std::string *val;
+    trx_id_t trx_id = 0;
 };
 
 struct header_t {
@@ -125,6 +128,43 @@ typedef std::lock_guard<std::mutex> lock_t;
 typedef std::shared_lock<std::shared_mutex> rlock_t;
 typedef std::unique_lock<std::shared_mutex> wlock_t;
 typedef std::lock_guard<std::recursive_mutex> recursive_lock_t;
+
+struct status {
+public:
+    status() {  }
+    status(const status& s) : code(s.code), msg(s.msg) {  }
+    status& operator=(const status& s)
+    {
+        code = s.code;
+        msg = s.msg;
+        return *this;
+    }
+    status(status&& s) : code(s.code), msg(std::move(s.msg)) {  }
+    status& operator=(status&& s)
+    {
+        code = s.code;
+        msg = std::move(s.msg);
+        return *this;
+    }
+
+    bool is_ok() { return code == Ok; }
+    bool is_not_found() { return code == NotFound; }
+    bool is_exists() { return code == Exists; }
+    const std::string& to_str() { return msg; }
+    static status ok() { return status(Ok, "Ok"); }
+    static status not_found() { return status(NotFound, "Not Found"); }
+    static status exists() { return status(Exists, "Key already exists"); }
+    static status error(const char *msg) { return status(Error, msg); }
+private:
+    enum Code {
+        Ok = 1,
+        NotFound = 2,
+        Exists = 3,
+        Error = 4,
+    } code;
+    status(Code code, const char *msg) : code(code), msg(msg) {  }
+    std::string msg;
+};
 
 }
 

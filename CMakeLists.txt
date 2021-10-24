@@ -12,6 +12,8 @@ set (DB
     ${SRC}/disk.cc
     ${SRC}/page.cc
     ${SRC}/log.cc
+    ${SRC}/transaction.cc
+    ${SRC}/transaction_lock.cc
 )
 
 set (HEADERS
@@ -21,6 +23,8 @@ set (HEADERS
     ${SRC}/codec.h
     ${SRC}/common.h
     ${SRC}/log.h
+    ${SRC}/transaction.h
+    ${SRC}/transaction_lock.h
 )
 
 add_library (bpdb STATIC ${DB})

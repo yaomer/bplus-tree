@@ -17,6 +17,8 @@ typedef std::pair<page_id_t, uint16_t> over_page_id_t;
 class page_manager {
 public:
     page_manager(DB *db) : db(db) {  }
+    page_manager(const page_manager&) = delete;
+    page_manager& operator=(const page_manager&) = delete;
     void init();
     page_id_t alloc_page();
     void free_page(page_id_t page_id);

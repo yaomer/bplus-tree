@@ -26,10 +26,7 @@ const std::string& DB::iterator::value()
 
 DB::iterator& DB::iterator::seek(const std::string& key)
 {
-    {
-        rlock_t rlk(db->root_latch);
-        db->root->lock_shared();
-    }
+    db->root->lock_shared();
     auto [node, pos] = db->find(db->root.get(), key);
     if (node) {
         page_id = db->to_page_id(node);

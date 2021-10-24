@@ -12,6 +12,7 @@
 #include "disk.h"
 #include "page.h"
 #include "log.h"
+#include "transaction.h"
 
 namespace bpdb {
 
@@ -33,15 +34,16 @@ struct options {
     Comparator keycomp;
 };
 
+enum OpType {
+    Insert = 1,
+    Update = 2,
+    Delete = 3,
+};
+
 class DB {
 public:
-    DB(const options& ops, const std::string& dbname)
-        : ops(ops), dbname(dbname), translation_table(this), page_manager(this), logger(this)
-    {
-        check_options();
-        init();
-    }
-    ~DB() { logger.quit_check_point(); }
+    DB(const options& ops, const std::string& dbname);
+    ~DB();
     DB(const DB&) = delete;
     DB& operator=(const DB&) = delete;
 
@@ -64,10 +66,15 @@ public:
         std::string saved_value;
     };
 
+    // 当你不再使用iterator的时候应该立即释放它
+    // 避免长时间占有(read root_latch)
     iterator *new_iterator();
-    bool find(const std::string& key, std::string *value);
-    void insert(const std::string& key, const std::string& value);
+    status find(const std::string& key, std::string *value);
+    status insert(const std::string& key, const std::string& value);
+    status update(const std::string& key, const std::string& value);
     void erase(const std::string& key);
+    // It is invalid after commit() or rollback() and you should delete it
+    transaction *begin() { return trmgr.begin(); }
     void rebuild();
 private:
     void init();
@@ -89,12 +96,14 @@ private:
     page_id_t to_page_id(node *node) { return translation_table.to_page_id(node); }
 
     int search(node *x, const key_t& key);
-    bool check_limit(const std::string& key, const std::string& value);
-    value_t *build_new_value(const std::string& value);
+    status check_limit(const std::string& key, const std::string& value);
+    value_t *build_new_value(const std::string& value, transaction *tx);
 
     std::pair<node*, int> find(node *x, const key_t& key);
-    void insert(node *x, const key_t& key, value_t *value);
-    void erase(node *x, const key_t& key, node *precursor);
+    status insert(const std::string& key, const std::string& value, char op, transaction *tx);
+    status insert(node *x, const key_t& key, value_t *value, char op, transaction *tx);
+    void erase(const std::string& key, transaction *tx);
+    void erase(node *x, const key_t& key, node *precursor, transaction *tx);
 
     bool isfull(node *x, const key_t& key, value_t *value);
     void split(node *x, int i, const key_t& key);
@@ -127,9 +136,10 @@ private:
     // 我们在做check_point()之前要保证sync_check_point=0，以保证刷脏页时数据库状态的一致性
     std::atomic_int sync_check_point = 0;
     std::atomic_int sync_read_point = 0;
-    // 正在进行check_point()，写操作将暂时阻塞
-    std::atomic_bool is_check_point = false;
-    std::atomic_bool is_rebuild = false;
+    // 将要进行checkpoint，阻塞所有修改操作
+    std::atomic_bool Checkpoint = false;
+    // 将要重建数据库，阻塞所有操作
+    std::atomic_bool Rebuild = false;
     header_t header;
     // 对header.page_size的并发访问是没有问题的，因为它不能在运行时更改
     std::recursive_mutex header_latch;
@@ -140,10 +150,13 @@ private:
     translation_table translation_table;
     page_manager page_manager;
     logger logger;
+    transaction_manager trmgr;
     Comparator comparator;
     friend class translation_table;
     friend class page_manager;
     friend class logger;
+    friend class transaction_manager;
+    friend class transaction;
 };
 }
 

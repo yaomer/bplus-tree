@@ -23,6 +23,20 @@ void panic(const char *fmt, ...)
 }
 }
 
+DB::DB(const options& ops, const std::string& dbname)
+    : ops(ops), dbname(dbname), translation_table(this), page_manager(this),
+      logger(this), trmgr(this)
+{
+    check_options();
+    init();
+}
+
+DB::~DB()
+{
+    trmgr.clear();
+    logger.quit_check_point();
+}
+
 void DB::check_options()
 {
     static std::unordered_set<int> valid_pages = {
@@ -58,6 +72,7 @@ void DB::init()
     dbfile = dbname + "dump.db";
     fd = open_db_file();
     limit.over_value = header.page_size / 16;
+    limit.over_value -= sizeof(trx_id_t);
     translation_table.init();
     page_manager.init();
     if (header.root_id == 0) {
@@ -67,6 +82,7 @@ void DB::init()
     } else {
         root.reset(translation_table.load_node(header.root_id));
     }
+    trmgr.init();
     logger.init();
 }
 
@@ -82,12 +98,12 @@ int DB::open_db_file()
 void DB::wait_if_check_point()
 {
     // 简单轮询以等待后台check_point()结束
-    if (is_check_point) while(is_check_point) ;
+    if (Checkpoint) while (Checkpoint) ;
 }
 
 void DB::wait_if_rebuild()
 {
-    if (is_rebuild) while (is_rebuild) ;
+    if (Rebuild) while (Rebuild) ;
 }
 
 void DB::wait_sync_point(bool sync_rw_point)
@@ -116,7 +132,22 @@ DB::iterator *DB::new_iterator()
 // 考虑到两个冲突的线程可能会同时重试的情况，我们规定冲突时反向的线程进行重试，
 // 这样可以保证冲突时只有一个线程会重试，另一个线程会继续执行。
 
-bool DB::find(const std::string& key, std::string *value)
+status DB::insert(const std::string& key, const std::string& value)
+{
+    return insert(key, value, Insert, nullptr);
+}
+
+status DB::update(const std::string& key, const std::string& value)
+{
+    return insert(key, value, Update, nullptr);
+}
+
+void DB::erase(const std::string& key)
+{
+    erase(key, nullptr);
+}
+
+status DB::find(const std::string& key, std::string *value)
 {
     wait_if_rebuild();
     {
@@ -125,14 +156,14 @@ bool DB::find(const std::string& key, std::string *value)
     }
     sync_read_point++;
     auto [x, i] = find(root.get(), key);
-    if (x) {
-        translation_table.load_real_value(x->values[i], value);
-        x->unlock_shared();
+    if (!x) {
         sync_read_point--;
-        return true;
+        return status::not_found();
     }
+    translation_table.load_real_value(x->values[i], value);
+    x->unlock_shared();
     sync_read_point--;
-    return false;
+    return status::ok();
 }
 
 std::pair<node*, int> DB::find(node *x, const key_t& key)
@@ -153,15 +184,12 @@ not_found:
     return { nullptr, 0 };
 }
 
-value_t *DB::build_new_value(const std::string& value)
+value_t *DB::build_new_value(const std::string& value, transaction *tx)
 {
     value_t *v = new value_t();
     v->reallen = value.size();
-    if (value.size() <= limit.over_value) {
-        v->val = new std::string(value);
-    } else {
-        v->val = const_cast<std::string*>(&value);
-    }
+    v->val = new std::string(value);
+    if (tx) v->trx_id = tx->trx_id;
     return v;
 }
 
@@ -169,13 +197,13 @@ namespace bpdb {
     thread_local bool retry = false;
 }
 
-void DB::insert(const std::string& key, const std::string& value)
+status DB::insert(const std::string& key, const std::string& value, char op, transaction *tx)
 {
-    if (!check_limit(key, value)) return;
+    auto s = check_limit(key, value);
+    if (!s.is_ok()) return s;
     wait_if_check_point();
     wait_if_rebuild();
-    logger.append(LOG_TYPE_INSERT, &key, &value);
-    value_t *v = build_new_value(value);
+    value_t *v = build_new_value(value, tx);
 retry_insert:
     {
         wlock_t wlk(root_latch);
@@ -203,30 +231,44 @@ retry_insert:
         split(root.get(), 0, key);
         if (retry) goto retry_insert;
     }
-    insert(root.get(), key, v);
+    s = insert(root.get(), key, v, op, tx);
     if (retry) goto retry_insert;
     sync_check_point--;
+    return s;
 }
 
-void DB::insert(node *x, const key_t& key, value_t *value)
+status DB::insert(node *x, const key_t& key, value_t *value, char op, transaction *tx)
 {
     int i = search(x, key);
     int n = x->keys.size();
     if (x->leaf) {
+        auto s = status::ok();
         if (i < n && equal(x->keys[i], key)) {
-            translation_table.free_value(x->values[i]);
-            x->values[i] = value;
-        } else {
-            x->resize(++n);
-            for (int j = n - 2; j >= i; j--) {
-                x->copy(j + 1, j);
+            if (op == Update) {
+                if (tx) tx->record(Update, key, x->values[i]);
+                logger.append_wal(op, key, value);
+                translation_table.free_value(x->values[i]);
+                x->values[i] = value;
+                x->update();
+            } else {
+                s = status::exists();
             }
-            x->keys[i] = key;
-            x->values[i] = value;
-            update_header_in_insert(x, key);
+        } else {
+            if (op == Insert) {
+                if (tx) tx->record(Delete, key, value);
+                logger.append_wal(op, key, value);
+                x->resize(++n);
+                for (int j = n - 2; j >= i; j--) {
+                    x->copy(j + 1, j);
+                }
+                x->keys[i] = key;
+                x->values[i] = value;
+                update_header_in_insert(x, key);
+                x->update();
+            }
         }
-        x->update();
         x->unlock();
+        return s;
     } else {
         if (i == n) {
             // 更新索引节点的右边界
@@ -243,7 +285,7 @@ void DB::insert(node *x, const key_t& key, value_t *value)
         child->lock();
         if (isfull(child, key, value)) {
             split(x, i, key);
-            if (retry) return;
+            if (retry) return status();
             if (less(x->keys[i], key)) {
                 // key被挪到了childs[i+1]中
                 child->unlock();
@@ -252,7 +294,7 @@ void DB::insert(node *x, const key_t& key, value_t *value)
             }
         }
         x->unlock();
-        insert(child, key, value);
+        return insert(child, key, value, op, tx);
     }
 }
 
@@ -386,17 +428,16 @@ void DB::link_leaf(node *z, node *y, int type)
     translation_table.put(z_page_id, z);
 }
 
-void DB::erase(const key_t& key)
+void DB::erase(const std::string& key, transaction *tx)
 {
     wait_if_check_point();
     wait_if_rebuild();
-    logger.append(LOG_TYPE_ERASE, &key);
     {
         wlock_t wlk(root_latch);
         root->lock();
     }
     sync_check_point++;
-    erase(root.get(), key, nullptr);
+    erase(root.get(), key, nullptr, tx);
     {
         rlock_t rlk(root_latch);
         root->lock_shared();
@@ -421,13 +462,15 @@ void DB::erase(const key_t& key)
     sync_check_point--;
 }
 
-void DB::erase(node *r, const key_t& key, node *precursor)
+void DB::erase(node *r, const key_t& key, node *precursor, transaction *tx)
 {
     int i = search(r, key);
     int n = r->keys.size();
     if (i == n) { r->unlock(); return; }
     if (r->leaf) {
         if (i < n && equal(r->keys[i], key)) {
+            if (tx) tx->record(Insert, key, r->values[i]);
+            logger.append_wal(Delete, key, r->values[i]);
             translation_table.free_value(r->values[i]);
             r->remove(i);
             lock_header();
@@ -451,7 +494,7 @@ void DB::erase(node *r, const key_t& key, node *precursor)
     size_t t = header.page_size / 2;
     if (x->page_used >= t) {
         r->unlock();
-        erase(x, key, precursor);
+        erase(x, key, precursor, tx);
         return;
     }
     node *y = i - 1 >= 0 ? to_node(r->childs[i - 1]) : nullptr;
@@ -463,13 +506,13 @@ void DB::erase(node *r, const key_t& key, node *precursor)
         borrow_from_left(r, x, y, i - 1);
         r->unlock();
         if (y != precursor) y->unlock();
-        erase(x, key, precursor);
+        erase(x, key, precursor, tx);
     } else if (z && z->page_used >= t) {
         if (y && y != precursor) y->unlock();
         borrow_from_right(r, x, z, i);
         r->unlock();
         if (z != precursor) z->unlock();
-        erase(x, key, precursor);
+        erase(x, key, precursor, tx);
     } else {
         if (y) {
             if (z && z != precursor) z->unlock();
@@ -478,14 +521,14 @@ void DB::erase(node *r, const key_t& key, node *precursor)
             r->childs[i - 1] = page_id;
             merge(y, x);
             r->unlock();
-            erase(y, key, precursor);
+            erase(y, key, precursor, tx);
         } else {
             page_id_t page_id = r->childs[i];
             r->remove(i);
             r->childs[i] = page_id;
             merge(x, z);
             r->unlock();
-            erase(x, key, precursor);
+            erase(x, key, precursor, tx);
         }
     }
 }
@@ -570,24 +613,23 @@ bool DB::isfull(node *x, const key_t& key, value_t *value)
 {
     size_t page_used = x->page_used;
     if (x->leaf) {
-        page_used += (limit.key_len_field + key.size()) + (limit.value_len_field + std::min(limit.over_value, (size_t)value->reallen));
+        page_used += (limit.key_len_field + key.size());
+        page_used += (limit.value_len_field + sizeof(trx_id_t) + std::min(limit.over_value, (size_t)value->reallen));
     } else {
         page_used += (limit.key_len_field + limit.max_key) + sizeof(page_id_t);
     }
     return page_used > header.page_size;
 }
 
-bool DB::check_limit(const std::string& key, const std::string& value)
+status DB::check_limit(const std::string& key, const std::string& value)
 {
     if (key.size() == 0 || key.size() > limit.max_key) {
-        printf("The range for key is (0, %zu]\n", limit.max_key);
-        return false;
+        return status::error("The key out of range (0, 255]");
     }
     if (value.size() > limit.max_value) {
-        printf("The range for value is [0, %zu]\n", limit.max_value);
-        return false;
+        return status::error("The value out of range [0, 4294967295]");
     }
-    return true;
+    return status::ok();
 }
 
 #include <dirent.h>
@@ -598,10 +640,10 @@ void DB::rebuild()
     mktemp(tmpname);
     {
         wlock_t wlk(root_latch);
-        if (is_rebuild) return;
+        if (Rebuild) return;
         logger.check_point();
         wait_if_check_point();
-        is_rebuild = true;
+        Rebuild = true;
         wait_sync_point(true);
     }
     DB *tmpdb = new DB(options(), tmpname);
@@ -620,5 +662,5 @@ void DB::rebuild()
     rmdir(dbname.c_str());
     rename(tmpname, dbname.c_str());
     init();
-    is_rebuild = false;
+    Rebuild = false;
 }

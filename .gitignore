@@ -3,3 +3,4 @@ test.cc
 dump.bpt
 tmp
 build/
+.*

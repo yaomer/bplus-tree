@@ -16,15 +16,17 @@ namespace bpdb {
 
 class DB;
 
-enum { LOG_TYPE_INSERT, LOG_TYPE_ERASE };
-
 class logger {
 public:
     logger(DB *db) : db(db),
-        quit_sync_logger(false), sync_logger([this]{ this->sync_log_handler(); }),
+        quit_sync_logger(false), sync_logger([this]{ this->sync_log_handler(); }), sync_wal(false),
         quit_cleaner(false), cleaner([this]{ this->clean_handler(); }) {  }
+    logger(const logger&) = delete;
+    logger& operator=(const logger&) = delete;
     void init();
-    void append(char type, const std::string *key, const std::string *value = nullptr);
+    void append_wal(char type, const std::string& key, value_t *value = nullptr,
+                    std::string *realval = nullptr);
+    void flush_wal(bool wait = false);
     void check_point();
     void quit_check_point();
 private:
@@ -32,6 +34,8 @@ private:
     void sync_log_handler();
     void clean_handler();
     void replay();
+
+    void format_wal(char type, const std::string& key, value_t *value, std::string *realval);
 
     DB *db;
     int log_fd;
@@ -41,6 +45,7 @@ private:
     std::condition_variable log_cv;
     std::atomic_bool quit_sync_logger;
     std::thread sync_logger;
+    std::atomic_bool sync_wal;
     std::string write_buf, flush_buf;
     std::mutex check_point_mtx;
     std::condition_variable check_point_cv;

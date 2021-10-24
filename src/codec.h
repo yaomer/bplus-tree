@@ -22,9 +22,16 @@ inline void encode32(std::string& buf, uint32_t n)
     buf.append(reinterpret_cast<char*>(&n), 4);
 }
 
+inline void encode64(std::string& buf, uint64_t n)
+{
+    buf.append(reinterpret_cast<char*>(&n), 8);
+}
+
+static_assert(sizeof(off_t) == 8, "");
+
 inline void encode_page_id(std::string& buf, page_id_t page_id)
 {
-    buf.append(reinterpret_cast<char*>(&page_id), sizeof(page_id));
+    encode64(buf, page_id);
 }
 
 inline uint8_t decode8(char **ptr)
@@ -48,11 +55,16 @@ inline uint32_t decode32(char **ptr)
     return n;
 }
 
+inline uint64_t decode64(char **ptr)
+{
+    uint64_t n = *reinterpret_cast<uint64_t*>(*ptr);
+    *ptr += 8;
+    return n;
+}
+
 inline page_id_t decode_page_id(char **ptr)
 {
-    page_id_t page_id = *reinterpret_cast<page_id_t*>(*ptr);
-    *ptr += sizeof(page_id);
-    return page_id;
+    return decode64(ptr);
 }
 
 }
