@@ -146,22 +146,12 @@ void transaction::record(char op, const std::string& key, value_t *value)
     }
 }
 
+// 针对同一个fd，多线程write(O_APPEND)是安全的
+
 void transaction_manager::write_trx_id(trx_id_t trx_id)
 {
-    if (trx_id - start_trx_id >= 1024 * 1024) {
-        char tmpfile[] = "tmp.XXXXX";
-        mktemp(tmpfile);
-        int fd = open(tmpfile, O_RDWR | O_APPEND | O_CREAT, 0666);
-        write(fd, &trx_id, sizeof(trx_id));
-        fsync(fd);
-        rename(tmpfile, info_file.c_str());
-        close(info_fd);
-        info_fd = fd;
-        start_trx_id = trx_id;
-    } else {
-        write(info_fd, &trx_id, sizeof(trx_id));
-        fsync(info_fd);
-    }
+    write(info_fd, &trx_id, sizeof(trx_id));
+    fsync(info_fd);
 }
 
 void transaction_manager::write_xid(trx_id_t xid)
@@ -172,9 +162,21 @@ void transaction_manager::write_xid(trx_id_t xid)
 
 void transaction_manager::clear_xid_file()
 {
+    // 此时的xid_file不再被需要
+    // 因此不必考虑删除与重新打开之间的原子性
     unlink(xid_file.c_str());
     close(xid_fd);
     xid_fd = open(xid_file.c_str(), O_RDWR | O_APPEND | O_CREAT, 0666);
+    // info_file仍然是需要的，但我们想在这里截断它
+    // 这需要保证原子性，最坏情形下，旧的info_file必须被保留
+    char tmpfile[] = "tmp.XXXXX";
+    mktemp(tmpfile);
+    int fd = open(tmpfile, O_RDONLY);
+    write(fd, &g_trx_id, sizeof(g_trx_id));
+    fsync(fd);
+    rename(tmpfile, info_file.c_str());
+    close(info_fd);
+    info_fd = fd;
 }
 
 std::set<trx_id_t> transaction_manager::get_xid_set()

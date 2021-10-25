@@ -71,7 +71,6 @@ private:
     std::map<trx_id_t, transaction*> active_trx_map;
     std::mutex trx_latch;
     std::string info_file;
-    trx_id_t start_trx_id = 0;
     int info_fd;
     std::string xid_file;
     int xid_fd;
