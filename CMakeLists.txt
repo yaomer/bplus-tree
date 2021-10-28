@@ -14,6 +14,7 @@ set (DB
     ${SRC}/log.cc
     ${SRC}/transaction.cc
     ${SRC}/transaction_lock.cc
+    ${SRC}/version.cc
 )
 
 set (HEADERS
@@ -25,6 +26,7 @@ set (HEADERS
     ${SRC}/log.h
     ${SRC}/transaction.h
     ${SRC}/transaction_lock.h
+    ${SRC}/version.h
 )
 
 add_library (bpdb STATIC ${DB})

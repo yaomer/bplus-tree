@@ -8,11 +8,19 @@
 #include <map>
 
 #include "transaction_lock.h"
+#include "version.h"
 
 namespace bpdb {
 
 class DB;
 class transaction_manager;
+
+struct readview {
+    bool is_visibility(trx_id_t data_id);
+    std::vector<trx_id_t> trx_ids;
+    trx_id_t up_trx_id;
+    trx_id_t create_trx_id;
+};
 
 class transaction {
 public:
@@ -29,6 +37,8 @@ public:
 private:
     void record(char op, const std::string& key, value_t *value = nullptr);
     void end();
+    void wait_commit();
+    bool is_visibility(trx_id_t data_id) { return view->is_visibility(data_id); }
 
     struct undo_log {
         undo_log(char op, trx_id_t xid, const std::string& key, const std::string& value)
@@ -41,12 +51,16 @@ private:
 
     DB *db;
     trx_id_t trx_id;
+    readview *view = nullptr;
     std::stack<undo_log> roll_logs;
     std::unordered_set<std::string> xlock_keys;
+    std::unordered_set<version_info*> version_set;
     std::mutex latch;
+    std::atomic_int trx_sync_point = 0;
     bool committed = false;
-    friend class transaction_manager;
     friend class DB;
+    friend class transaction_manager;
+    friend class versions;
 };
 
 class transaction_manager {
@@ -66,6 +80,8 @@ private:
     void write_trx_id(trx_id_t trx_id);
     std::set<trx_id_t> get_xid_set(const std::string& file);
 
+    readview *build_readview(trx_id_t trx_id);
+
     DB *db;
     trx_id_t g_trx_id = 0;
     std::map<trx_id_t, transaction*> active_trx_map;
@@ -77,6 +93,7 @@ private:
     // 阻塞生成新事务
     std::atomic_bool blocking = false;
     transaction_locker locker;
+    versions versions;
     friend class transaction;
 };
 }

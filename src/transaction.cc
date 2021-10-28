@@ -20,7 +20,7 @@ void transaction_manager::init()
     info_fd = open(info_file.c_str(), O_RDWR | O_APPEND | O_CREAT, 0666);
     auto trx_id_set = get_xid_set(info_file);
     if (!trx_id_set.empty()) {
-        g_trx_id = *--trx_id_set.end();
+        g_trx_id = *trx_id_set.rbegin();
     }
 }
 
@@ -56,6 +56,7 @@ transaction::~transaction()
 {
     // 未执行完的事务就需要回滚
     if (!committed) rollback();
+    if (view) delete view;
     lock_t lk(db->trmgr.trx_latch);
     db->trmgr.active_trx_map.erase(trx_id);
     if (db->trmgr.active_trx_map.empty() && db->trmgr.blocking)
@@ -67,7 +68,16 @@ void transaction::end()
     for (auto& key : xlock_keys) {
         db->trmgr.locker.unlock(trx_id, key);
     }
+    for (auto& vinfo : version_set) {
+        vinfo->unref();
+    }
     db->trmgr.write_xid(trx_id);
+}
+
+void transaction::wait_commit()
+{
+    if (trx_sync_point > 0)
+        while (trx_sync_point > 0) ;
 }
 
 // 事务提交时，只需flush wal即可保证持久性
@@ -77,6 +87,7 @@ void transaction::commit()
     assert(!committed);
     lock_t lk(latch);
     committed = true;
+    wait_commit();
     // Write Transaction?
     if (!roll_logs.empty()) {
         db->logger.flush_wal(true);
@@ -90,6 +101,7 @@ void transaction::rollback()
     assert(!committed);
     lock_t lk(latch);
     committed = true;
+    wait_commit();
     while (!roll_logs.empty()) {
         auto& ulog = roll_logs.top();
         switch (ulog.op) {
@@ -104,26 +116,58 @@ void transaction::rollback()
 
 status transaction::find(const std::string& key, std::string *value)
 {
+    if (!view) {
+        lock_t lk(latch);
+        if (!view) view = db->trmgr.build_readview(trx_id);
+    }
     assert(!committed);
-    return db->find(key, value);
+    trx_sync_point++;
+    {
+        lock_t lk(latch);
+        if (xlock_keys.count(key)) {
+            auto s = db->find(key, value);
+            trx_sync_point--;
+            return s;
+        }
+    }
+    auto vinfo = db->trmgr.versions.get(key, this);
+    if (vinfo) {
+        value->assign(vinfo->get_value());
+        auto iter = version_set.emplace(vinfo);
+        if (iter.second) vinfo->ref();
+        trx_sync_point--;
+        return status::ok();
+    } else {
+        auto s = db->find(key, value);
+        trx_sync_point--;
+        return s;
+    }
 }
 
 status transaction::insert(const std::string& key, const std::string& value)
 {
     assert(!committed);
-    return db->insert(key, value, Insert, this);
+    trx_sync_point++;
+    auto s = db->insert(key, value, Insert, this);
+    trx_sync_point--;
+    return s;
 }
 
 status transaction::update(const std::string& key, const std::string& value)
 {
     assert(!committed);
-    return db->insert(key, value, Update, this);
+    trx_sync_point++;
+    auto s = db->insert(key, value, Update, this);
+    trx_sync_point--;
+    return s;
 }
 
 void transaction::erase(const std::string& key)
 {
     assert(!committed);
-    return db->erase(key, this);
+    trx_sync_point++;
+    db->erase(key, this);
+    trx_sync_point--;
 }
 
 // 我们会将undo log当作普通数据一样写入WAL中
@@ -132,7 +176,6 @@ void transaction::record(char op, const std::string& key, value_t *value)
 {
     std::string *realval = value->val;
     std::string saved_value;
-    value->trx_id = trx_id;
     if (op != Delete && value->reallen > limit.over_value) {
         db->translation_table.load_real_value(value, &saved_value);
         realval = &saved_value;
@@ -144,6 +187,7 @@ void transaction::record(char op, const std::string& key, value_t *value)
         xlock_keys.emplace(key);
         roll_logs.emplace(undo_log(op, trx_id, key, *realval));
     }
+    db->trmgr.versions.add(key, *realval, value->trx_id);
 }
 
 // 针对同一个fd，多线程write(O_APPEND)是安全的
@@ -209,4 +253,24 @@ std::set<trx_id_t> transaction_manager::get_xid_set(const std::string& file)
     }
     close(fd);
     return xid_set;
+}
+
+readview *transaction_manager::build_readview(trx_id_t trx_id)
+{
+    readview *view = new readview();
+    {
+        lock_t lk(trx_latch);
+        for (auto& [trx_id, tx] : active_trx_map)
+            view->trx_ids.push_back(trx_id);
+    }
+    view->create_trx_id = trx_id;
+    view->up_trx_id = g_trx_id + 1;
+    return view;
+}
+
+bool readview::is_visibility(trx_id_t data_id)
+{
+    if (data_id < trx_ids[0] || data_id == create_trx_id) return true;
+    if (data_id >= up_trx_id) return false;
+    return !std::binary_search(trx_ids.begin(), trx_ids.end(), data_id);
 }
