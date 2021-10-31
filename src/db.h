@@ -127,7 +127,15 @@ private:
         return !comparator(l, r) && !comparator(r, l);
     }
 
+    void lock_db();
+    void unlock_db();
+    std::string get_lock_file_name()
+    {
+        return dbname + "lock";
+    }
+
     int fd;
+    int lock_fd;
     options ops;
     std::string dbname;
     std::string dbfile;

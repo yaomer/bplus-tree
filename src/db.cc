@@ -35,6 +35,7 @@ DB::~DB()
 {
     trmgr.clear();
     logger.quit_check_point();
+    unlock_db();
 }
 
 void DB::check_options()
@@ -69,6 +70,7 @@ void DB::init()
     if (dbname.empty()) panic("dbname is empty");
     if (dbname.back() != '/') dbname.push_back('/');
     mkdir(dbname.c_str(), 0777);
+    lock_db();
     dbfile = dbname + "dump.db";
     fd = open_db_file();
     limit.over_value = header.page_size / 16;
@@ -84,6 +86,24 @@ void DB::init()
     }
     trmgr.init();
     logger.init();
+}
+
+void DB::lock_db()
+{
+    auto lock_file_name = get_lock_file_name();
+    lock_fd = open(lock_file_name.c_str(), O_RDWR | O_CREAT, 0644);
+    if (lock_fd < 0) {
+        panic("open(%s): %s", lock_file_name.c_str(), strerror(errno));
+    }
+    if (flock(lock_fd, LOCK_EX | LOCK_NB) < 0) {
+        panic("%s is already locked by another process", lock_file_name.c_str());
+    }
+}
+
+void DB::unlock_db()
+{
+    flock(lock_fd, LOCK_UN);
+    unlink(get_lock_file_name().c_str());
 }
 
 int DB::open_db_file()
