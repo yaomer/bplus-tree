@@ -1,7 +1,7 @@
 #include "version.h"
 #include "transaction.h"
 
-using namespace bpdb;
+namespace bpdb {
 
 static const int stripes = 64;
 
@@ -80,3 +80,5 @@ void versions::purge()
         }
     }
 }
+
+} // namespace bpdb

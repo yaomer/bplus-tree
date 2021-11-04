@@ -9,6 +9,9 @@
 
 namespace bpdb {
 
+// 目前的实现很容易死锁：
+// T1: hold(k1), require(k2)
+// T2: hold(k2), require(k1)
 class transaction_locker {
 public:
     transaction_locker();

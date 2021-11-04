@@ -1,6 +1,7 @@
 #include "transaction.h"
 #include "db.h"
 #include "codec.h"
+#include "util.h"
 
 #include <sys/stat.h>
 #include <sys/mman.h>
@@ -8,7 +9,7 @@
 // 简单的事务实现(isolation(RU))
 // TODO: MVCC
 
-using namespace bpdb;
+namespace bpdb {
 
 void transaction_manager::init()
 {
@@ -195,13 +196,13 @@ void transaction::record(char op, const std::string& key, value_t *value)
 void transaction_manager::write_trx_id(trx_id_t trx_id)
 {
     write(info_fd, &trx_id, sizeof(trx_id));
-    fsync(info_fd);
+    sync_fd(info_fd);
 }
 
 void transaction_manager::write_xid(trx_id_t xid)
 {
     write(xid_fd, &xid, sizeof(xid));
-    fsync(xid_fd);
+    sync_fd(xid_fd);
 }
 
 void transaction_manager::clear_xid_file()
@@ -217,7 +218,7 @@ void transaction_manager::clear_xid_file()
     mktemp(tmpfile);
     int fd = open(tmpfile, O_RDONLY);
     write(fd, &g_trx_id, sizeof(g_trx_id));
-    fsync(fd);
+    sync_fd(fd);
     rename(tmpfile, info_file.c_str());
     close(info_fd);
     info_fd = fd;
@@ -274,3 +275,5 @@ bool readview::is_visibility(trx_id_t data_id)
     if (data_id >= up_trx_id) return false;
     return !std::binary_search(trx_ids.begin(), trx_ids.end(), data_id);
 }
+
+} // namespace bpdb

@@ -1,6 +1,6 @@
 #include "transaction_lock.h"
 
-using namespace bpdb;
+namespace bpdb {
 
 transaction_locker::transaction_locker() : stripes(16)
 {
@@ -79,3 +79,5 @@ void transaction_locker::unlock(trx_id_t trx_id, const std::string& key)
     }
     lk_map.mtx.unlock();
 }
+
+} // namespace bpdb

@@ -3,8 +3,9 @@
 
 #include "db.h"
 #include "codec.h"
+#include "util.h"
 
-using namespace bpdb;
+namespace bpdb {
 
 void translation_table::init()
 {
@@ -101,7 +102,7 @@ void translation_table::flush()
     // 以便重启后可以成功load根节点
     save_node(db->header.root_id, db->root.get());
     save_header(&db->header);
-    fsync(db->fd);
+    sync_fd(db->fd);
 }
 
 // ########################### file-header ###########################
@@ -413,3 +414,5 @@ void translation_table::release_root(node *root)
     translation_to_node.erase(page_id);
     translation_to_page.erase(root);
 }
+
+} // namespace bpdb

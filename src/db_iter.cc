@@ -1,6 +1,6 @@
 #include "db.h"
 
-using namespace bpdb;
+namespace bpdb {
 
 bool DB::iterator::valid()
 {
@@ -73,3 +73,5 @@ DB::iterator& DB::iterator::prev()
     }
     return *this;
 }
+
+} // namespace bpdb

@@ -4,8 +4,6 @@
 
 #include "db.h"
 
-using namespace bpdb;
-
 namespace bpdb {
 
 struct limit_t limit;
@@ -20,7 +18,6 @@ void panic(const char *fmt, ...)
     va_end(ap);
     // TODO: do sth
     exit(1);
-}
 }
 
 DB::DB(const options& ops, const std::string& dbname)
@@ -213,9 +210,7 @@ value_t *DB::build_new_value(const std::string& value, transaction *tx)
     return v;
 }
 
-namespace bpdb {
-    thread_local bool retry = false;
-}
+static thread_local bool retry = false;
 
 status DB::insert(const std::string& key, const std::string& value, char op, transaction *tx)
 {
@@ -684,3 +679,5 @@ void DB::rebuild()
     init();
     Rebuild = false;
 }
+
+} // namespace bpdb

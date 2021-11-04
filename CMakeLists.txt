@@ -4,7 +4,17 @@ project (bplus-tree)
 
 set (CMAKE_CXX_FLAGS "-std=c++17 -Wall -O2")
 
+include (CheckCXXSymbolExists)
+
+CHECK_CXX_SYMBOL_EXISTS(fdatasync "unistd.h" HAVE_FDATASYNC)
+CHECK_CXX_SYMBOL_EXISTS(F_FULLFSYNC "fcntl.h" HAVE_FULLFSYNC)
+
 set (SRC "${PROJECT_SOURCE_DIR}/src")
+
+configure_file (
+    "${SRC}/config.h.in"
+    "${SRC}/config.h"
+)
 
 set (DB
     ${SRC}/db.cc
@@ -15,6 +25,7 @@ set (DB
     ${SRC}/transaction.cc
     ${SRC}/transaction_lock.cc
     ${SRC}/version.cc
+    ${SRC}/util.cc
 )
 
 set (HEADERS

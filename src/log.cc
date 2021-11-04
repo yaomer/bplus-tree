@@ -4,8 +4,9 @@
 
 #include "db.h"
 #include "codec.h"
+#include "util.h"
 
-using namespace bpdb;
+namespace bpdb {
 
 void logger::init()
 {
@@ -78,7 +79,7 @@ void logger::sync_log_handler()
             write_buf.swap(flush_buf);
         }
         write(log_fd, flush_buf.data(), flush_buf.size());
-        fsync(log_fd);
+        sync_fd(log_fd);
         flush_buf.clear();
         sync_wal = false;
     }
@@ -163,3 +164,5 @@ void logger::clean_handler()
         db->Checkpoint = false;
     }
 }
+
+} // namespace bpdb

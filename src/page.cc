@@ -5,7 +5,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 
-using namespace bpdb;
+namespace bpdb {
 
 void page_manager::init()
 {
@@ -322,3 +322,5 @@ void page_manager::remove_by_avail(page_id_t page_id, uint16_t avail)
     }
     if (page_list.empty()) avail_map.erase(avail);
 }
+
+} // namespace bpdb
