@@ -9,7 +9,7 @@ include (CheckCXXSymbolExists)
 CHECK_CXX_SYMBOL_EXISTS(fdatasync "unistd.h" HAVE_FDATASYNC)
 CHECK_CXX_SYMBOL_EXISTS(F_FULLFSYNC "fcntl.h" HAVE_FULLFSYNC)
 
-set (SRC "${PROJECT_SOURCE_DIR}/src")
+set (SRC "${PROJECT_SOURCE_DIR}/bpdb")
 
 configure_file (
     "${SRC}/config.h.in"
