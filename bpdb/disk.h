@@ -1,5 +1,5 @@
-#ifndef _BPLUS_TREE_DISK_H
-#define _BPLUS_TREE_DISK_H
+#ifndef __BPDB_DISK_H
+#define __BPDB_DISK_H
 
 #include <unordered_map>
 #include <vector>
@@ -64,4 +64,4 @@ private:
 };
 }
 
-#endif // _BPLUS_TREE_DISK_H
+#endif // __BPDB_DISK_H

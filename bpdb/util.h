@@ -1,5 +1,5 @@
-#ifndef _BPLUS_TREE_UTIL_H
-#define _BPLUS_TREE_UTIL_H
+#ifndef __BPDB_UTIL_H
+#define __BPDB_UTIL_H
 
 namespace bpdb {
 
@@ -8,4 +8,4 @@ int sync_fd(int fd);
 
 }
 
-#endif // _BPLUS_TREE_UTIL_H
+#endif // __BPDB_UTIL_H

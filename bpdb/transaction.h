@@ -1,5 +1,5 @@
-#ifndef _BPLUS_TREE_TRANSACTION_H
-#define _BPLUS_TREE_TRANSACTION_H
+#ifndef __BPDB_TRANSACTION_H
+#define __BPDB_TRANSACTION_H
 
 #include <set>
 #include <stack>
@@ -98,4 +98,4 @@ private:
 };
 }
 
-#endif // _BPLUS_TREE_TRANSACTION_H
+#endif // __BPDB_TRANSACTION_H

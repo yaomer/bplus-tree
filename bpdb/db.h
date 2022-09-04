@@ -1,5 +1,5 @@
-#ifndef _BPLUS_TREE_DB_H
-#define _BPLUS_TREE_DB_H
+#ifndef __BPDB_DB_H
+#define __BPDB_DB_H
 
 #include <string>
 #include <vector>
@@ -168,4 +168,4 @@ private:
 };
 }
 
-#endif // _BPLUS_TREE_DB_H
+#endif // __BPDB_DB_H

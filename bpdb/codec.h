@@ -1,5 +1,5 @@
-#ifndef _BPLUS_TREE_CODEC_H
-#define _BPLUS_TREE_CODEC_H
+#ifndef __BPDB_CODEC_H
+#define __BPDB_CODEC_H
 
 #include <string>
 
@@ -69,4 +69,4 @@ inline page_id_t decode_page_id(char **ptr)
 
 }
 
-#endif // _BPLUS_TREE_CODEC_H
+#endif // __BPDB_CODEC_H

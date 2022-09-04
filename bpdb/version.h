@@ -1,5 +1,5 @@
-#ifndef _BPLUS_TREE_VERSION_H
-#define _BPLUS_TREE_VERSION_H
+#ifndef __BPDB_VERSION_H
+#define __BPDB_VERSION_H
 
 #include <unordered_map>
 #include <list>
@@ -46,4 +46,4 @@ private:
 };
 }
 
-#endif // _BPLUS_TREE_VERSION_H
+#endif // __BPDB_VERSION_H

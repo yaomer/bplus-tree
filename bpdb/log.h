@@ -1,5 +1,5 @@
-#ifndef _BPLUS_TREE_LOG_H
-#define _BPLUS_TREE_LOG_H
+#ifndef __BPDB_LOG_H
+#define __BPDB_LOG_H
 
 #include <string>
 #include <map>
@@ -56,4 +56,4 @@ private:
 };
 }
 
-#endif // _BPLUS_TREE_LOG_H
+#endif // __BPDB_LOG_H

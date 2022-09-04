@@ -1,5 +1,5 @@
-#ifndef _BPLUS_TREE_PAGE_H
-#define _BPLUS_TREE_PAGE_H
+#ifndef __BPDB_PAGE_H
+#define __BPDB_PAGE_H
 
 #include <map>
 #include <vector>
@@ -45,4 +45,4 @@ private:
 };
 }
 
-#endif // _BPLUS_TREE_PAGE_H
+#endif // __BPDB_PAGE_H

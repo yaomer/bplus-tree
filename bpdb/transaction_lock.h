@@ -1,5 +1,5 @@
-#ifndef _BPLUS_TREE_TRANSACTION_LOCK_H
-#define _BPLUS_TREE_TRANSACTION_LOCK_H
+#ifndef __BPDB_TRANSACTION_LOCK_H
+#define __BPDB_TRANSACTION_LOCK_H
 
 #include <string>
 #include <vector>
@@ -37,4 +37,4 @@ private:
 };
 }
 
-#endif // _BPLUS_TREE_TRANSACTION_LOCK_H
+#endif // __BPDB_TRANSACTION_LOCK_H
